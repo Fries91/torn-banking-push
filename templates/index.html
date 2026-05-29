@@ -14,23 +14,29 @@
       <div>
         <div class="kicker">Torn faction banking alerts</div>
         <h1>🪙 {{ app_name }}</h1>
-        <p>Faction leaders create a push key here. Bankers connect their phones. Your Torn banking script sends direct phone alerts.</p>
+        <p>Faction leaders create named banker keys. Each banker/user opens the Users tab once with their key to enable phone alerts. The banking script can then use that key to ping that specific phone.</p>
       </div>
       <div class="badge">14-day free trial</div>
     </section>
 
     <section class="card notice">
-      <b>Payment rule:</b> Each active banker key costs <b>2 Xanax every 30 days</b>. Payments must match the current active-key price for 30, 60, 90, or 120 days. Extra approved payments extend the countdown.
+      <b>Payment rule:</b> Each active banker key costs <b>2 Xanax every 30 days</b>. Only one key is allowed per banker Torn ID. Payments must match the current active-key price for 30, 60, 90, or 120 days. Extra approved payments extend the countdown.
     </section>
 
+    <div class="tabs">
+      <button class="tab active" data-tab="leadersTab">Leaders</button>
+      <button class="tab" data-tab="usersTab">Users</button>
+    </div>
+
+    <section id="leadersTab" class="tabPanel active">
     <section class="grid">
       <div class="card">
-        <h2>1) Create faction push key</h2>
+        <h2>1) Leader creates faction push key</h2>
         <label>Faction ID <input id="regFactionId" placeholder="49384" /></label>
         <label>Faction name <input id="regFactionName" placeholder="7DS*: Wrath" /></label>
-        <label>Leader name <input id="regLeaderName" placeholder="Fries91" /></label>
-        <label>Leader Torn ID <input id="regLeaderId" placeholder="3679030" /></label>
-        <button id="registerFactionBtn">Create / get key</button>
+        <label>Leader Torn API key <input id="regLeaderApiKey" type="password" placeholder="Leader key only, not stored" /></label>
+        <p class="small">The app verifies this key belongs to the Torn faction leader. It is not saved.</p>
+        <button id="registerFactionBtn">Verify leader + create/get key</button>
         <pre id="registerOut"></pre>
       </div>
 
@@ -45,44 +51,44 @@
 
 
     <section class="card notice">
-      <b>Leader banker keys:</b> The leader/faction push key controls the subscription. A leader can create unlimited banker keys. Each banker uses their own key to connect their phone. If the faction countdown expires, all banker keys stop sending alerts until payment is approved.
+      <b>Leader banker keys:</b> Only the verified Torn faction leader of that exact faction can create/list/revoke banker keys. Every leader action requires the faction key plus the leader's Torn API key. Updates are scoped to that faction only, so one faction leader cannot edit another faction's keys.
     </section>
 
     <section class="grid">
       <div class="card">
         <h2>3) Leader creates banker keys</h2>
         <label>Leader/faction push key <input id="leaderKeyToken" placeholder="tbp_..." /></label>
-        <label>Banker name <input id="bankerKeyName" placeholder="Banker name" /></label>
-        <label>Banker Torn ID <input id="bankerKeyTornId" placeholder="optional" /></label>
-        <label>Created by <input id="bankerKeyCreatedBy" placeholder="Leader name" /></label>
-        <button id="createBankerKeyBtn">Create banker key</button>
+        <label>Leader Torn API key <input id="leaderApiKey" type="password" placeholder="Required every time, not stored" /></label>
+        <label>Key label <input id="bankerKeyLabel" placeholder="Example: Night banker / Vault pay / John" /></label>
+        <label>Who this key is for <input id="bankerKeyName" placeholder="Banker/user name" /></label>
+        <label>Banker Torn ID <input id="bankerKeyTornId" placeholder="Recommended for one-key-per-banker" /></label>
+        <button id="createBankerKeyBtn">Verify leader + create banker key</button>
         <button id="listBankerKeysBtn">List banker keys</button>
         <div id="bankerKeysList"></div>
         <pre id="bankerKeyOut"></pre>
       </div>
 
+</section>
+</section>
+
+    <section id="usersTab" class="tabPanel">
+    <section class="grid">
       <div class="card">
-        <h2>4) Banker connects phone</h2>
-        <p class="small">Use the banker key the leader gave you. Leaders/admins can still use the main faction key if needed.</p>
-        <label>Banker key or faction key <input id="deviceToken" placeholder="banker_... or tbp_..." /></label>
-        <label>Your Torn name <input id="deviceName" placeholder="Banker name" /></label>
+        <h2>1) User connects phone</h2>
+        <p class="small">Use the banker_ key your leader gave you. One key = one phone registration. Alerts sent with your key go only to your registered phone.</p>
+        <label>Your banker key <input id="deviceToken" placeholder="banker_..." /></label>
+        <label>Your Torn name <input id="deviceName" placeholder="Your name" /></label>
         <label>Your Torn ID <input id="deviceTornId" placeholder="optional" /></label>
-        <label>Role
-          <select id="deviceRole">
-            <option value="banker">Banker</option>
-            <option value="leader">Leader</option>
-            <option value="admin">Admin</option>
-            <option value="user">User</option>
-          </select>
-        </label>
+        <input id="deviceRole" type="hidden" value="banker" />
         <button id="enablePushBtn">Enable phone alerts</button>
         <pre id="deviceOut"></pre>
       </div>
     </section>
+    </section>
 
     <section class="grid">
       <div class="card">
-        <h2>5) Submit payment verification</h2>
+        <h2>2) Submit payment verification</h2>
         <label>Faction push key <input id="payToken" placeholder="tbp_..." /></label>
         <label>Your Torn name <input id="payName" placeholder="Who sent the Xanax" /></label>
         <label>Your Torn ID <input id="payTornId" placeholder="optional" /></label>
@@ -100,8 +106,8 @@
 
     <section class="grid">
       <div class="card">
-        <h2>6) Test banking alert</h2>
-        <label>Faction push key <input id="testToken" placeholder="tbp_..." /></label>
+        <h2>3) Test banking alert</h2>
+        <label>Faction push key or banker key <input id="testToken" placeholder="tbp_... or banker_..." /></label>
         <label>Requester <input id="testRequester" placeholder="Fries91" /></label>
         <label>Amount <input id="testAmount" placeholder="$25,000,000" /></label>
         <button id="testBtn">Send test alert</button>
