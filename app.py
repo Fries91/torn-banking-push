@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from flask import Flask, request, jsonify, render_template
+import requests
 from flask_cors import CORS
 from pywebpush import webpush, WebPushException
 
@@ -18,6 +19,7 @@ ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'change-me-now')
 TRIAL_DAYS = int(os.getenv('TRIAL_DAYS', '14'))
 XANAX_PER_BANKER_KEY_30_DAYS = int(os.getenv('XANAX_PER_BANKER_KEY_30_DAYS', '2'))
 MAX_PAYMENT_MONTHS = int(os.getenv('MAX_PAYMENT_MONTHS', '4'))
+TORN_API_BASE = os.getenv('TORN_API_BASE', 'https://api.torn.com')
 
 app = Flask(__name__)
 CORS(app)
@@ -65,6 +67,7 @@ def init_db():
             faction_name TEXT NOT NULL,
             leader_name TEXT NOT NULL,
             leader_torn_id TEXT,
+            leader_verified_at TEXT,
             api_token TEXT UNIQUE NOT NULL,
             created_at TEXT NOT NULL,
             trial_until TEXT NOT NULL,
@@ -115,6 +118,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS banker_keys (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             faction_id TEXT NOT NULL,
+            key_label TEXT,
             banker_name TEXT NOT NULL,
             banker_torn_id TEXT,
             banker_key TEXT UNIQUE NOT NULL,
@@ -139,6 +143,13 @@ def init_db():
             con.execute('ALTER TABLE payment_claims ADD COLUMN monthly_cost_at_claim INTEGER DEFAULT 0')
         if 'months_paid' not in claim_cols:
             con.execute('ALTER TABLE payment_claims ADD COLUMN months_paid INTEGER DEFAULT 0')
+        faction_cols = [r['name'] for r in con.execute('PRAGMA table_info(factions)').fetchall()]
+        if 'leader_verified_at' not in faction_cols:
+            con.execute('ALTER TABLE factions ADD COLUMN leader_verified_at TEXT')
+
+        banker_cols = [r['name'] for r in con.execute('PRAGMA table_info(banker_keys)').fetchall()]
+        if 'key_label' not in banker_cols:
+            con.execute('ALTER TABLE banker_keys ADD COLUMN key_label TEXT')
 
 
 @app.before_request
@@ -178,6 +189,7 @@ def public_faction(row):
         'faction_name': row['faction_name'],
         'leader_name': row['leader_name'],
         'leader_torn_id': row['leader_torn_id'],
+        'leader_verified_at': row['leader_verified_at'] if 'leader_verified_at' in row.keys() else None,
         'api_token': row['api_token'],
         'created_at': row['created_at'],
         'trial_until': row['trial_until'],
@@ -203,6 +215,7 @@ def public_banker_key(row):
     return {
         'id': row['id'],
         'faction_id': row['faction_id'],
+        'key_label': row['key_label'] if 'key_label' in row.keys() else None,
         'banker_name': row['banker_name'],
         'banker_torn_id': row['banker_torn_id'],
         'banker_key': row['banker_key'],
@@ -211,6 +224,53 @@ def public_banker_key(row):
         'created_at': row['created_at'],
         'last_used': row['last_used'],
     }
+
+
+def torn_api_get(path, key, params=None):
+    params = dict(params or {})
+    params['key'] = key
+    url = TORN_API_BASE.rstrip('/') + path
+    res = requests.get(url, params=params, timeout=12)
+    try:
+        data = res.json()
+    except Exception:
+        return {'ok': False, 'error': 'torn_bad_json', 'status_code': res.status_code}
+    if res.status_code >= 400 or data.get('error'):
+        return {'ok': False, 'error': 'torn_api_error', 'details': data.get('error') or data, 'status_code': res.status_code}
+    return {'ok': True, 'data': data}
+
+
+def verify_torn_faction_leader(faction_id, leader_api_key):
+    """Verify the supplied Torn API key belongs to the actual leader of this faction.
+    The key is not stored; it is only used for this check.
+    """
+    if not leader_api_key:
+        return {'ok': False, 'error': 'leader_torn_api_key_required'}
+    profile = torn_api_get('/user/', leader_api_key, {'selections': 'profile'})
+    if not profile.get('ok'):
+        return profile
+    data = profile['data']
+    player_id = str(data.get('player_id') or data.get('id') or '').strip()
+    name = str(data.get('name') or '').strip()
+    faction = data.get('faction') or {}
+    user_faction_id = str(faction.get('faction_id') or faction.get('id') or '').strip()
+    position = str(faction.get('position') or '').strip()
+    if user_faction_id != str(faction_id):
+        return {'ok': False, 'error': 'api_key_not_for_this_faction', 'player_id': player_id, 'name': name, 'faction_id': user_faction_id}
+    if position.lower() not in ['leader', 'faction leader']:
+        return {'ok': False, 'error': 'api_key_owner_is_not_faction_leader', 'player_id': player_id, 'name': name, 'position': position}
+    return {'ok': True, 'player_id': player_id, 'name': name, 'position': position, 'faction_id': user_faction_id}
+
+
+def require_verified_leader_for_faction(row, leader_api_key):
+    check = verify_torn_faction_leader(row['faction_id'], leader_api_key)
+    if not check.get('ok'):
+        return check
+    now = iso(utcnow())
+    with db() as con:
+        con.execute('UPDATE factions SET leader_name=?, leader_torn_id=?, leader_verified_at=? WHERE faction_id=?',
+                    (check.get('name') or row['leader_name'], check.get('player_id') or row['leader_torn_id'], now, row['faction_id']))
+    return check
 
 
 def require_admin(fn):
@@ -246,22 +306,31 @@ def register_faction():
     data = request.get_json(force=True)
     faction_id = str(data.get('faction_id', '')).strip()
     faction_name = str(data.get('faction_name', '')).strip()
-    leader_name = str(data.get('leader_name', '')).strip()
-    leader_torn_id = str(data.get('leader_torn_id', '')).strip()
-    if not faction_id or not faction_name or not leader_name:
-        return jsonify({'ok': False, 'error': 'faction_id, faction_name, and leader_name are required'}), 400
+    leader_api_key = str(data.get('leader_api_key', '')).strip()
+    if not faction_id or not faction_name or not leader_api_key:
+        return jsonify({'ok': False, 'error': 'faction_id, faction_name, and leader_torn_api_key are required'}), 400
+
+    leader_check = verify_torn_faction_leader(faction_id, leader_api_key)
+    if not leader_check.get('ok'):
+        return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
+
     now = utcnow()
     token = 'tbp_' + uuid.uuid4().hex + uuid.uuid4().hex[:12]
     trial_until = now + timedelta(days=TRIAL_DAYS)
+    leader_name = leader_check.get('name') or str(data.get('leader_name', '')).strip() or 'Faction Leader'
+    leader_torn_id = leader_check.get('player_id') or str(data.get('leader_torn_id', '')).strip()
     with db() as con:
         existing = con.execute('SELECT * FROM factions WHERE faction_id=?', (faction_id,)).fetchone()
         if existing:
-            return jsonify({'ok': True, 'faction': public_faction(existing), 'message': 'Faction already registered. Use this existing key.'})
-        con.execute('''INSERT INTO factions(faction_id, faction_name, leader_name, leader_torn_id, api_token, created_at, trial_until)
-                       VALUES(?,?,?,?,?,?,?)''',
-                    (faction_id, faction_name, leader_name, leader_torn_id, token, iso(now), iso(trial_until)))
+            con.execute('UPDATE factions SET leader_name=?, leader_torn_id=?, leader_verified_at=? WHERE faction_id=?',
+                        (leader_name, leader_torn_id, iso(now), faction_id))
+            existing = con.execute('SELECT * FROM factions WHERE faction_id=?', (faction_id,)).fetchone()
+            return jsonify({'ok': True, 'faction': public_faction(existing), 'message': 'Leader verified. Existing faction key returned.'})
+        con.execute("""INSERT INTO factions(faction_id, faction_name, leader_name, leader_torn_id, leader_verified_at, api_token, created_at, trial_until)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (faction_id, faction_name, leader_name, leader_torn_id, iso(now), token, iso(now), iso(trial_until)))
         row = con.execute('SELECT * FROM factions WHERE faction_id=?', (faction_id,)).fetchone()
-    return jsonify({'ok': True, 'faction': public_faction(row), 'message': f'Free {TRIAL_DAYS}-day trial started.'})
+    return jsonify({'ok': True, 'faction': public_faction(row), 'message': f'Leader verified. Free {TRIAL_DAYS}-day trial started.'})
 
 
 @app.post('/api/factions/status')
@@ -287,29 +356,46 @@ def faction_status():
 def create_banker_key():
     data = request.get_json(force=True)
     token = str(data.get('api_token', '')).strip()
+    leader_api_key = str(data.get('leader_api_key', '')).strip()
     row = get_faction_by_token(token)
     if not row:
         return jsonify({'ok': False, 'error': 'invalid_leader_faction_key'}), 404
+    leader_check = require_verified_leader_for_faction(row, leader_api_key)
+    if not leader_check.get('ok'):
+        return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
+
+    key_label = str(data.get('key_label', '')).strip()
     banker_name = str(data.get('banker_name', '')).strip()
     banker_torn_id = str(data.get('banker_torn_id', '')).strip()
-    created_by = str(data.get('created_by', row['leader_name'])).strip() or row['leader_name']
+    created_by = leader_check.get('name') or row['leader_name']
     if not banker_name:
         return jsonify({'ok': False, 'error': 'banker_name is required'}), 400
-    key = 'banker_' + uuid.uuid4().hex + uuid.uuid4().hex[:8]
+
     with db() as con:
-        con.execute('''INSERT INTO banker_keys(faction_id, banker_name, banker_torn_id, banker_key, created_by, created_at)
-                       VALUES(?,?,?,?,?,?)''', (row['faction_id'], banker_name, banker_torn_id, key, created_by, iso(utcnow())))
+        if banker_torn_id:
+            existing = con.execute('SELECT * FROM banker_keys WHERE faction_id=? AND banker_torn_id=?', (row['faction_id'], banker_torn_id)).fetchone()
+        else:
+            existing = con.execute('SELECT * FROM banker_keys WHERE faction_id=? AND lower(banker_name)=lower(?)', (row['faction_id'], banker_name)).fetchone()
+        if existing:
+            return jsonify({'ok': True, 'banker_key': public_banker_key(existing), 'message': 'This banker/user already has a key. One key per banker is enforced.'})
+        key = 'banker_' + uuid.uuid4().hex + uuid.uuid4().hex[:8]
+        con.execute("""INSERT INTO banker_keys(faction_id, key_label, banker_name, banker_torn_id, banker_key, created_by, created_at)
+                       VALUES(?,?,?,?,?,?,?)""", (row['faction_id'], key_label or banker_name, banker_name, banker_torn_id, key, created_by, iso(utcnow())))
         bk = con.execute('SELECT * FROM banker_keys WHERE banker_key=?', (key,)).fetchone()
-    return jsonify({'ok': True, 'banker_key': public_banker_key(bk), 'message': 'Give this key only to that banker. They use it to connect their phone.'})
+    return jsonify({'ok': True, 'banker_key': public_banker_key(bk), 'message': 'Give this key only to that banker/user. They open the Users tab, paste the key, and enable phone alerts.'})
 
 
 @app.post('/api/banker-keys/list')
 def list_banker_keys():
     data = request.get_json(force=True)
     token = str(data.get('api_token', '')).strip()
+    leader_api_key = str(data.get('leader_api_key', '')).strip()
     row = get_faction_by_token(token)
     if not row:
         return jsonify({'ok': False, 'error': 'invalid_leader_faction_key'}), 404
+    leader_check = require_verified_leader_for_faction(row, leader_api_key)
+    if not leader_check.get('ok'):
+        return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
     with db() as con:
         keys = [public_banker_key(r) for r in con.execute('SELECT * FROM banker_keys WHERE faction_id=? ORDER BY created_at DESC', (row['faction_id'],)).fetchall()]
     return jsonify({'ok': True, 'banker_keys': keys, 'faction': public_faction(row)})
@@ -319,10 +405,14 @@ def list_banker_keys():
 def revoke_banker_key():
     data = request.get_json(force=True)
     token = str(data.get('api_token', '')).strip()
+    leader_api_key = str(data.get('leader_api_key', '')).strip()
     banker_key = str(data.get('banker_key', '')).strip()
     row = get_faction_by_token(token)
     if not row:
         return jsonify({'ok': False, 'error': 'invalid_leader_faction_key'}), 404
+    leader_check = require_verified_leader_for_faction(row, leader_api_key)
+    if not leader_check.get('ok'):
+        return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
     with db() as con:
         con.execute('UPDATE banker_keys SET is_active=0 WHERE faction_id=? AND banker_key=?', (row['faction_id'], banker_key))
         con.execute('DELETE FROM devices WHERE faction_id=? AND banker_key=?', (row['faction_id'], banker_key))
@@ -333,10 +423,14 @@ def revoke_banker_key():
 def enable_banker_key():
     data = request.get_json(force=True)
     token = str(data.get('api_token', '')).strip()
+    leader_api_key = str(data.get('leader_api_key', '')).strip()
     banker_key = str(data.get('banker_key', '')).strip()
     row = get_faction_by_token(token)
     if not row:
         return jsonify({'ok': False, 'error': 'invalid_leader_faction_key'}), 404
+    leader_check = require_verified_leader_for_faction(row, leader_api_key)
+    if not leader_check.get('ok'):
+        return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
     with db() as con:
         con.execute('UPDATE banker_keys SET is_active=1 WHERE faction_id=? AND banker_key=?', (row['faction_id'], banker_key))
     return jsonify({'ok': True, 'message': 'Banker key enabled.'})
@@ -357,11 +451,22 @@ def register_device():
         banker_key_value = token
     role = str(data.get('role', 'banker')).strip().lower()
     if banker_key_row:
+        # A banker/user key can only register the phone assigned to that key.
+        # The user cannot self-promote into leader/admin from the Users tab.
         role = 'banker'
-    if role not in ['banker', 'leader', 'admin', 'user']:
-        return jsonify({'ok': False, 'error': 'role must be banker, leader, admin, or user'}), 400
-    name = str(data.get('name', '')).strip() or (banker_key_row['banker_name'] if banker_key_row else 'Unknown Banker')
-    torn_id = str(data.get('torn_id', '')).strip() or (banker_key_row['banker_torn_id'] if banker_key_row else None)
+    else:
+        # Direct faction-key phone registration is leader-only. This prevents a copied faction key
+        # from being used by random users to register banker/admin phones.
+        if role != 'leader':
+            return jsonify({'ok': False, 'error': 'use_a_banker_key_to_register_user_phone'}), 403
+        leader_api_key = str(data.get('leader_api_key', '')).strip()
+        leader_check = require_verified_leader_for_faction(row, leader_api_key)
+        if not leader_check.get('ok'):
+            return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
+    if role not in ['banker', 'leader']:
+        return jsonify({'ok': False, 'error': 'role must be banker or leader'}), 400
+    name = str(data.get('name', '')).strip() or (banker_key_row['banker_name'] if banker_key_row else (leader_check.get('name') if 'leader_check' in locals() else 'Unknown'))
+    torn_id = str(data.get('torn_id', '')).strip() or (banker_key_row['banker_torn_id'] if banker_key_row else (leader_check.get('player_id') if 'leader_check' in locals() else None))
     sub = data.get('subscription')
     if not sub:
         return jsonify({'ok': False, 'error': 'missing push subscription'}), 400
@@ -397,8 +502,16 @@ def banking_request():
     data = request.get_json(force=True)
     token = str(data.get('api_token', '')).strip()
     row = get_faction_by_token(token)
+    banker_key_row = None
+    target_banker_key = None
     if not row:
-        return jsonify({'ok': False, 'error': 'invalid_faction_key'}), 404
+        banker_key_row = get_banker_key(token)
+        if not banker_key_row or not banker_key_row['is_active']:
+            return jsonify({'ok': False, 'error': 'invalid_or_inactive_banker_key'}), 404
+        row = get_faction_by_token(banker_key_row['api_token'])
+        target_banker_key = token
+    if not row:
+        return jsonify({'ok': False, 'error': 'invalid_faction_or_banker_key'}), 404
     status = public_faction(row)
     if status['locked']:
         return jsonify({'ok': False, 'error': 'faction_key_locked', 'faction': status}), 402
@@ -408,18 +521,26 @@ def banking_request():
     alert_id = uuid.uuid4().hex
     title = '🪙 New Torn Banking Request'
     body = f'{requester} requested {amount}.' + (f' {note}' if note else '')
+    if banker_key_row:
+        title = '🪙 Banking Request For You'
     now = iso(utcnow())
-    data_json = {'url': data.get('url') or BASE_URL, 'type': 'banking_request', 'alert_id': alert_id}
+    data_json = {'url': data.get('url') or BASE_URL, 'type': 'banking_request', 'alert_id': alert_id, 'target_banker_key': bool(target_banker_key)}
     with db() as con:
-        con.execute('''INSERT INTO alerts(id, faction_id, title, body, amount, requester_name, created_at, data_json)
-                       VALUES(?,?,?,?,?,?,?,?)''',
+        con.execute("""INSERT INTO alerts(id, faction_id, title, body, amount, requester_name, created_at, data_json)
+                       VALUES(?,?,?,?,?,?,?,?)""",
                     (alert_id, row['faction_id'], title, body, amount, requester, now, json.dumps(data_json)))
-        devices = con.execute('''SELECT d.* FROM devices d
-                                 LEFT JOIN banker_keys bk ON bk.banker_key=d.banker_key
-                                 WHERE d.faction_id=? AND (
-                                   d.role IN ("leader", "admin")
-                                   OR (d.role="banker" AND (d.banker_key IS NULL OR bk.is_active=1))
-                                 )''', (row['faction_id'],)).fetchall()
+        if target_banker_key:
+            devices = con.execute("""SELECT d.* FROM devices d
+                                     JOIN banker_keys bk ON bk.banker_key=d.banker_key
+                                     WHERE d.faction_id=? AND d.role='banker' AND d.banker_key=? AND bk.is_active=1""",
+                                  (row['faction_id'], target_banker_key)).fetchall()
+        else:
+            devices = con.execute("""SELECT d.* FROM devices d
+                                     LEFT JOIN banker_keys bk ON bk.banker_key=d.banker_key
+                                     WHERE d.faction_id=? AND (
+                                       d.role IN ('leader', 'admin')
+                                       OR (d.role='banker' AND (d.banker_key IS NULL OR bk.is_active=1))
+                                     )""", (row['faction_id'],)).fetchall()
     sent = 0
     failed = 0
     for d in devices:
@@ -428,7 +549,7 @@ def banking_request():
             sent += 1
         else:
             failed += 1
-    return jsonify({'ok': True, 'alert_id': alert_id, 'sent': sent, 'failed': failed, 'faction': status})
+    return jsonify({'ok': True, 'alert_id': alert_id, 'sent': sent, 'failed': failed, 'targeted_banker_key': bool(target_banker_key), 'faction': status})
 
 
 @app.post('/api/alerts/list')
@@ -567,4 +688,3 @@ def admin_factions():
 if __name__ == '__main__':
     init_db()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', '5000')), debug=True)
-
