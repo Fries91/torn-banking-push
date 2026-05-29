@@ -1,1 +1,16 @@
-
+services:
+  - type: web
+    name: torn-banking-push
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 120
+    envVars:
+      - key: APP_NAME
+        value: Torn Banking Push
+      - key: DATABASE_PATH
+        value: data/torn_banking_push.sqlite3
+      - key: TRIAL_DAYS
+        value: 14
+      - key: XANAX_PER_BANKER_KEY_30_DAYS
+        value: 5
