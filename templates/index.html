@@ -7,6 +7,10 @@
   <link rel="manifest" href="/static/manifest.json" />
   <link rel="stylesheet" href="/static/style.css" />
   <meta name="theme-color" content="#111827" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Bank Push" />
+  <link rel="apple-touch-icon" href="/static/icon-192.png" />
 </head>
 <body>
   <main class="wrap">
@@ -16,7 +20,11 @@
         <h1>🪙 {{ app_name }}</h1>
         <p>Faction leaders create named banker keys. Each banker/user opens the Users tab once with their key to enable phone alerts. The banking script can then use that key to ping that specific phone.</p>
       </div>
-      <div class="badge">14-day free trial</div>
+      <div class="heroActions">
+        <div class="badge">14-day free trial</div>
+        <button id="installAppBtn" class="installBtn" hidden>📲 Install app icon</button>
+        <div id="installHelp" class="small installHelp">Open this page on your phone, then install it to make a clickable app icon.</div>
+      </div>
     </section>
 
     <section class="card notice">
@@ -29,61 +37,59 @@
     </div>
 
     <section id="leadersTab" class="tabPanel active">
-    <section class="grid">
-      <div class="card">
-        <h2>1) Leader creates faction push key</h2>
-        <label>Faction ID <input id="regFactionId" placeholder="49384" /></label>
-        <label>Faction name <input id="regFactionName" placeholder="7DS*: Wrath" /></label>
-        <label>Leader Torn API key <input id="regLeaderApiKey" type="password" placeholder="Leader key only, not stored" /></label>
-        <p class="small">The app verifies this key belongs to the Torn faction leader. It is not saved.</p>
-        <button id="registerFactionBtn">Verify leader + create/get key</button>
-        <pre id="registerOut"></pre>
-      </div>
+      <section class="grid">
+        <div class="card">
+          <h2>1) Leader creates faction push key</h2>
+          <label>Faction ID <input id="regFactionId" placeholder="49384" /></label>
+          <label>Faction name <input id="regFactionName" placeholder="7DS*: Wrath" /></label>
+          <label>Leader Torn API key <input id="regLeaderApiKey" type="password" placeholder="Leader key only, not stored" /></label>
+          <p class="small">The app verifies this key belongs to the Torn faction leader. It is not saved.</p>
+          <button id="registerFactionBtn">Verify leader + create/get key</button>
+          <pre id="registerOut"></pre>
+        </div>
 
-      <div class="card">
-        <h2>2) Check countdown</h2>
-        <label>Faction push key <input id="statusToken" placeholder="tbp_..." /></label>
-        <button id="statusBtn">Check key status</button>
-        <div id="countdown" class="countdown">No key loaded.</div>
-        <pre id="statusOut"></pre>
-      </div>
+        <div class="card">
+          <h2>2) Check countdown</h2>
+          <label>Faction push key <input id="statusToken" placeholder="tbp_..." /></label>
+          <button id="statusBtn">Check key status</button>
+          <div id="countdown" class="countdown">No key loaded.</div>
+          <pre id="statusOut"></pre>
+        </div>
+      </section>
+
+      <section class="card notice">
+        <b>Leader banker keys:</b> Only the verified Torn faction leader of that exact faction can create/list/revoke banker keys. Every leader action requires the faction key plus the leader's Torn API key. Updates are scoped to that faction only, so one faction leader cannot edit another faction's keys.
+      </section>
+
+      <section class="grid">
+        <div class="card">
+          <h2>3) Leader creates banker keys</h2>
+          <label>Leader/faction push key <input id="leaderKeyToken" placeholder="tbp_..." /></label>
+          <label>Leader Torn API key <input id="leaderApiKey" type="password" placeholder="Required every time, not stored" /></label>
+          <label>Key label <input id="bankerKeyLabel" placeholder="Example: Night banker / Vault pay / John" /></label>
+          <label>Who this key is for <input id="bankerKeyName" placeholder="Banker/user name" /></label>
+          <label>Banker Torn ID <input id="bankerKeyTornId" placeholder="Recommended for one-key-per-banker" /></label>
+          <button id="createBankerKeyBtn">Verify leader + create banker key</button>
+          <button id="listBankerKeysBtn">List banker keys</button>
+          <div id="bankerKeysList"></div>
+          <pre id="bankerKeyOut"></pre>
+        </div>
+      </section>
     </section>
-
-
-    <section class="card notice">
-      <b>Leader banker keys:</b> Only the verified Torn faction leader of that exact faction can create/list/revoke banker keys. Every leader action requires the faction key plus the leader's Torn API key. Updates are scoped to that faction only, so one faction leader cannot edit another faction's keys.
-    </section>
-
-    <section class="grid">
-      <div class="card">
-        <h2>3) Leader creates banker keys</h2>
-        <label>Leader/faction push key <input id="leaderKeyToken" placeholder="tbp_..." /></label>
-        <label>Leader Torn API key <input id="leaderApiKey" type="password" placeholder="Required every time, not stored" /></label>
-        <label>Key label <input id="bankerKeyLabel" placeholder="Example: Night banker / Vault pay / John" /></label>
-        <label>Who this key is for <input id="bankerKeyName" placeholder="Banker/user name" /></label>
-        <label>Banker Torn ID <input id="bankerKeyTornId" placeholder="Recommended for one-key-per-banker" /></label>
-        <button id="createBankerKeyBtn">Verify leader + create banker key</button>
-        <button id="listBankerKeysBtn">List banker keys</button>
-        <div id="bankerKeysList"></div>
-        <pre id="bankerKeyOut"></pre>
-      </div>
-
-</section>
-</section>
 
     <section id="usersTab" class="tabPanel">
-    <section class="grid">
-      <div class="card">
-        <h2>1) User connects phone</h2>
-        <p class="small">Use the banker_ key your leader gave you. One key = one phone registration. Alerts sent with your key go only to your registered phone.</p>
-        <label>Your banker key <input id="deviceToken" placeholder="banker_..." /></label>
-        <label>Your Torn name <input id="deviceName" placeholder="Your name" /></label>
-        <label>Your Torn ID <input id="deviceTornId" placeholder="optional" /></label>
-        <input id="deviceRole" type="hidden" value="banker" />
-        <button id="enablePushBtn">Enable phone alerts</button>
-        <pre id="deviceOut"></pre>
-      </div>
-    </section>
+      <section class="grid">
+        <div class="card">
+          <h2>1) User connects phone</h2>
+          <p class="small">Use the banker_ key your leader gave you. One key = one phone registration. Alerts sent with your key go only to your registered phone.</p>
+          <label>Your banker key <input id="deviceToken" placeholder="banker_..." /></label>
+          <label>Your Torn name <input id="deviceName" placeholder="Your name" /></label>
+          <label>Your Torn ID <input id="deviceTornId" placeholder="optional" /></label>
+          <input id="deviceRole" type="hidden" value="banker" />
+          <button id="enablePushBtn">Enable phone alerts</button>
+          <pre id="deviceOut"></pre>
+        </div>
+      </section>
     </section>
 
     <section class="grid">
@@ -122,8 +128,12 @@
       </div>
     </section>
   </main>
+
   <script>
-    window.TBP_CONFIG = { vapidPublicKey: {{ vapid_public_key|tojson }}, baseUrl: {{ base_url|tojson }} };
+    window.TBP_CONFIG = {
+      vapidPublicKey: {{ vapid_public_key|tojson }},
+      baseUrl: {{ base_url|tojson }}
+    };
   </script>
   <script src="/static/app.js"></script>
 </body>
