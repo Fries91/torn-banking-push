@@ -1,1 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ app_name }}</title>
+  <link rel="manifest" href="/static/manifest.json" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <meta name="theme-color" content="#111827" />
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero card">
+      <div>
+        <div class="kicker">Torn faction banking alerts</div>
+        <h1>🪙 {{ app_name }}</h1>
+        <p>Faction leaders create a push key here. Bankers connect their phones. Your Torn banking script sends direct phone alerts.</p>
+      </div>
+      <div class="badge">14-day free trial</div>
+    </section>
 
+    <section class="card notice">
+      <b>Payment rule:</b> Each active banker key costs <b>2 Xanax every 30 days</b>. Payments must match the current active-key price for 30, 60, 90, or 120 days. Extra approved payments extend the countdown.
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>1) Create faction push key</h2>
+        <label>Faction ID <input id="regFactionId" placeholder="49384" /></label>
+        <label>Faction name <input id="regFactionName" placeholder="7DS*: Wrath" /></label>
+        <label>Leader name <input id="regLeaderName" placeholder="Fries91" /></label>
+        <label>Leader Torn ID <input id="regLeaderId" placeholder="3679030" /></label>
+        <button id="registerFactionBtn">Create / get key</button>
+        <pre id="registerOut"></pre>
+      </div>
+
+      <div class="card">
+        <h2>2) Check countdown</h2>
+        <label>Faction push key <input id="statusToken" placeholder="tbp_..." /></label>
+        <button id="statusBtn">Check key status</button>
+        <div id="countdown" class="countdown">No key loaded.</div>
+        <pre id="statusOut"></pre>
+      </div>
+    </section>
+
+
+    <section class="card notice">
+      <b>Leader banker keys:</b> The leader/faction push key controls the subscription. A leader can create unlimited banker keys. Each banker uses their own key to connect their phone. If the faction countdown expires, all banker keys stop sending alerts until payment is approved.
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>3) Leader creates banker keys</h2>
+        <label>Leader/faction push key <input id="leaderKeyToken" placeholder="tbp_..." /></label>
+        <label>Banker name <input id="bankerKeyName" placeholder="Banker name" /></label>
+        <label>Banker Torn ID <input id="bankerKeyTornId" placeholder="optional" /></label>
+        <label>Created by <input id="bankerKeyCreatedBy" placeholder="Leader name" /></label>
+        <button id="createBankerKeyBtn">Create banker key</button>
+        <button id="listBankerKeysBtn">List banker keys</button>
+        <div id="bankerKeysList"></div>
+        <pre id="bankerKeyOut"></pre>
+      </div>
+
+      <div class="card">
+        <h2>4) Banker connects phone</h2>
+        <p class="small">Use the banker key the leader gave you. Leaders/admins can still use the main faction key if needed.</p>
+        <label>Banker key or faction key <input id="deviceToken" placeholder="banker_... or tbp_..." /></label>
+        <label>Your Torn name <input id="deviceName" placeholder="Banker name" /></label>
+        <label>Your Torn ID <input id="deviceTornId" placeholder="optional" /></label>
+        <label>Role
+          <select id="deviceRole">
+            <option value="banker">Banker</option>
+            <option value="leader">Leader</option>
+            <option value="admin">Admin</option>
+            <option value="user">User</option>
+          </select>
+        </label>
+        <button id="enablePushBtn">Enable phone alerts</button>
+        <pre id="deviceOut"></pre>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>5) Submit payment verification</h2>
+        <label>Faction push key <input id="payToken" placeholder="tbp_..." /></label>
+        <label>Your Torn name <input id="payName" placeholder="Who sent the Xanax" /></label>
+        <label>Your Torn ID <input id="payTornId" placeholder="optional" /></label>
+        <div class="small" id="payPriceHint">Check countdown first to load the allowed payment amounts.</div>
+        <label>Xanax sent
+          <select id="payAmount">
+            <option value="">Check faction status first</option>
+          </select>
+        </label>
+        <label>Proof / note <textarea id="payProof" placeholder="Paste Torn event text or transaction note here"></textarea></label>
+        <button id="paymentBtn">Submit for Fries91 approval</button>
+        <pre id="paymentOut"></pre>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>6) Test banking alert</h2>
+        <label>Faction push key <input id="testToken" placeholder="tbp_..." /></label>
+        <label>Requester <input id="testRequester" placeholder="Fries91" /></label>
+        <label>Amount <input id="testAmount" placeholder="$25,000,000" /></label>
+        <button id="testBtn">Send test alert</button>
+        <pre id="testOut"></pre>
+      </div>
+
+      <div class="card admin">
+        <h2>Fries91 admin</h2>
+        <label>Admin password <input id="adminPass" type="password" placeholder="ADMIN_PASSWORD" /></label>
+        <button id="adminPendingBtn">Show pending payments</button>
+        <div id="pendingPayments"></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    window.TBP_CONFIG = { vapidPublicKey: {{ vapid_public_key|tojson }}, baseUrl: {{ base_url|tojson }} };
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
