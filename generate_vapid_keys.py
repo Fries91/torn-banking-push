@@ -12,15 +12,11 @@ vapid.generate_keys()
 
 private_key = vapid.private_key
 public_key = private_key.public_key()
-
 public_numbers = public_key.public_numbers()
 x = public_numbers.x.to_bytes(32, "big")
 y = public_numbers.y.to_bytes(32, "big")
-
-# Web Push public key format: 0x04 + X + Y
 public_key_b64 = b64url(b"\x04" + x + y)
 
-# Private key PEM for backend/server use
 private_key_pem = private_key.private_bytes(
     encoding=serialization.Encoding.PEM,
     format=serialization.PrivateFormat.PKCS8,
