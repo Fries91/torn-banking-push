@@ -1,13 +1,28 @@
 const $ = (id) => document.getElementById(id);
+
 const store = {
   get token(){ return localStorage.getItem('tbp_token') || ''; },
   set token(v){ localStorage.setItem('tbp_token', v || ''); fillTokens(); }
 };
+
 let countdownTimer = null;
 
 function fillTokens(){
-  ['statusToken','leaderKeyToken','payToken','testToken'].forEach(id=>{ if($(id) && !$(id).value) $(id).value = store.token; });
+  ['statusToken','leaderKeyToken','payToken','testToken'].forEach(id=>{
+    if($(id) && !$(id).value) $(id).value = store.token;
+  });
 }
+
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tabPanel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    const panel = document.getElementById(btn.dataset.tab);
+    if(panel) panel.classList.add('active');
+  });
+});
+
 fillTokens();
 
 function out(id, obj){ $(id).textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2); }
@@ -30,8 +45,7 @@ $('registerFactionBtn').onclick = async () => {
   const res = await api('/api/factions/register', {
     faction_id: $('regFactionId').value,
     faction_name: $('regFactionName').value,
-    leader_name: $('regLeaderName').value,
-    leader_torn_id: $('regLeaderId').value
+    leader_api_key: $('regLeaderApiKey').value
   });
   if(res.ok && res.faction && res.faction.api_token) store.token = res.faction.api_token;
   out('registerOut', res);
@@ -91,7 +105,7 @@ async function renderBankerKeys(res){
   const keys = res.banker_keys || [];
   box.innerHTML = keys.map(k => `
     <div class="payment">
-      <b>${escapeHtml(k.banker_name)}</b> ${k.banker_torn_id ? '('+escapeHtml(k.banker_torn_id)+')' : ''}<br>
+      <b>${escapeHtml(k.key_label || k.banker_name)}</b><br>For: ${escapeHtml(k.banker_name)} ${k.banker_torn_id ? '('+escapeHtml(k.banker_torn_id)+')' : ''}<br>
       Status: ${k.is_active ? 'active' : 'revoked'}<br>
       Key: <code>${escapeHtml(k.banker_key)}</code><br>
       Created: ${escapeHtml(k.created_at || '')}<br>
@@ -106,9 +120,10 @@ $('createBankerKeyBtn').onclick = async () => {
   const token = $('leaderKeyToken').value.trim(); if(token) store.token = token;
   const res = await api('/api/banker-keys/create', {
     api_token: token,
+    key_label: $('bankerKeyLabel').value,
     banker_name: $('bankerKeyName').value,
     banker_torn_id: $('bankerKeyTornId').value,
-    created_by: $('bankerKeyCreatedBy').value
+    leader_api_key: $('leaderApiKey').value
   });
   out('bankerKeyOut', res);
   if(res.ok) { $('listBankerKeysBtn').click(); $('statusBtn').click(); }
@@ -116,16 +131,16 @@ $('createBankerKeyBtn').onclick = async () => {
 
 $('listBankerKeysBtn').onclick = async () => {
   const token = $('leaderKeyToken').value.trim(); if(token) store.token = token;
-  const res = await api('/api/banker-keys/list', {api_token: token});
+  const res = await api('/api/banker-keys/list', {api_token: token, leader_api_key: $('leaderApiKey').value});
   renderBankerKeys(res);
 };
 
 window.revokeBankerKey = async (bankerKey) => {
-  const res = await api('/api/banker-keys/revoke', {api_token:$('leaderKeyToken').value.trim(), banker_key:bankerKey});
+  const res = await api('/api/banker-keys/revoke', {api_token:$('leaderKeyToken').value.trim(), leader_api_key:$('leaderApiKey').value, banker_key:bankerKey});
   out('bankerKeyOut', res); $('listBankerKeysBtn').click(); $('statusBtn').click();
 };
 window.enableBankerKey = async (bankerKey) => {
-  const res = await api('/api/banker-keys/enable', {api_token:$('leaderKeyToken').value.trim(), banker_key:bankerKey});
+  const res = await api('/api/banker-keys/enable', {api_token:$('leaderKeyToken').value.trim(), leader_api_key:$('leaderApiKey').value, banker_key:bankerKey});
   out('bankerKeyOut', res); $('listBankerKeysBtn').click(); $('statusBtn').click();
 };
 window.copyText = async (txt) => { try { await navigator.clipboard.writeText(txt); alert('Copied key'); } catch(e) { prompt('Copy this key', txt); } };
@@ -139,7 +154,7 @@ $('enablePushBtn').onclick = async () => {
   const permission = await Notification.requestPermission();
   if(permission !== 'granted'){ out('deviceOut', 'Notifications were not allowed.'); return; }
   const sub = await reg.pushManager.subscribe({ userVisibleOnly:true, applicationServerKey:urlBase64ToUint8Array(window.TBP_CONFIG.vapidPublicKey) });
-  const token = $('deviceToken').value.trim(); if(token && !token.startsWith('banker_')) store.token = token;
+  const token = $('deviceToken').value.trim();
   const res = await api('/api/devices/register', { api_token: token, name:$('deviceName').value, torn_id:$('deviceTornId').value, role:$('deviceRole').value, subscription:sub });
   out('deviceOut', res);
 };
@@ -183,4 +198,3 @@ window.rejectClaim = async (id) => {
   alert(JSON.stringify(res, null, 2)); $('adminPendingBtn').click();
 };
 function escapeHtml(s){ return String(s).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
-
