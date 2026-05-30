@@ -4,13 +4,18 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ app_name }}</title>
+
   <link rel="manifest" href="/static/manifest.json" />
   <link rel="stylesheet" href="/static/style.css" />
+
   <meta name="theme-color" content="#111827" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Bank Push" />
-  <link rel="apple-touch-icon" href="/static/icon-192.png" />
+
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png" />
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
 </head>
 <body>
   <main class="wrap">
@@ -20,9 +25,10 @@
         <h1>🪙 {{ app_name }}</h1>
         <p>Faction leaders create named banker keys. Each banker/user opens the Users tab once with their key to enable phone alerts. The banking script can then use that key to ping that specific phone.</p>
       </div>
+
       <div class="heroActions">
         <div class="badge">14-day free trial</div>
-        <button id="installAppBtn" class="installBtn" hidden>📲 Install app icon</button>
+        <button id="installAppBtn" class="installBtn">📲 Install app icon</button>
         <div id="installHelp" class="small installHelp">Open this page on your phone, then install it to make a clickable app icon.</div>
       </div>
     </section>
@@ -58,7 +64,7 @@
       </section>
 
       <section class="card notice">
-        <b>Leader banker keys:</b> Only the verified Torn faction leader of that exact faction can create/list/revoke banker keys. Every leader action requires the faction key plus the leader's Torn API key. Updates are scoped to that faction only, so one faction leader cannot edit another faction's keys.
+        <b>Leader banker keys:</b> Only the verified Torn faction leader of that exact faction can create/list/revoke banker keys. Every leader action requires the faction key plus the leader's Torn API key.
       </section>
 
       <section class="grid">
