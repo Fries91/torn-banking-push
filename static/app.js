@@ -19,24 +19,18 @@ const store = {
 let countdownTimer = null;
 let deferredInstallPrompt = null;
 
-function isiOS(){
-  return /iphone|ipad|ipod/i.test(navigator.userAgent);
-}
+function isiOS(){ return /iphone|ipad|ipod/i.test(navigator.userAgent); }
 
 function updateInstallHelp(){
   const help = $('installHelp');
   if(!help) return;
-
   if(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches){
     help.textContent = 'App icon installed. Open Bank Push from your home screen.';
     return;
   }
-
-  if(isiOS()){
-    help.textContent = 'iPhone/iPad: open in Safari, tap Share, then Add to Home Screen.';
-  } else {
-    help.textContent = 'Android: tap Install app icon. If no popup appears, use browser menu → Add to Home screen.';
-  }
+  help.textContent = isiOS()
+    ? 'iPhone/iPad: open in Safari, tap Share, then Add to Home Screen.'
+    : 'Android: tap Install app icon. If no popup appears, use browser menu → Add to Home screen.';
 }
 
 window.addEventListener('beforeinstallprompt', (event) => {
@@ -61,7 +55,6 @@ if($('installAppBtn')){
       updateInstallHelp();
       return;
     }
-
     alert(isiOS()
       ? 'On iPhone/iPad: open this page in Safari, tap Share, then Add to Home Screen.'
       : 'If the install popup does not appear, use Chrome menu ⋮ then Add to Home screen or Install app.'
@@ -88,19 +81,17 @@ document.querySelectorAll('.tab').forEach(btn => {
 fillTokens();
 
 function out(id, obj){
-  $(id).textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+  if($(id)) $(id).textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
 }
 
 async function api(path, body, adminPass){
   const headers = {'Content-Type':'application/json'};
   if(adminPass) headers['X-Admin-Password'] = adminPass;
-
   const res = await fetch(path, {
     method:'POST',
     headers,
     body: JSON.stringify(body || {})
   });
-
   const json = await res.json().catch(()=>({ok:false,error:'bad_json'}));
   if(!res.ok && !json.error) json.error = 'HTTP ' + res.status;
   return json;
@@ -119,7 +110,6 @@ $('registerFactionBtn').onclick = async () => {
     faction_name: $('regFactionName').value,
     leader_api_key: $('regLeaderApiKey').value
   });
-
   if(res.ok && res.faction && res.faction.api_token) store.token = res.faction.api_token;
   out('registerOut', res);
   if(res.ok) showCountdown(res.faction);
@@ -128,7 +118,6 @@ $('registerFactionBtn').onclick = async () => {
 $('statusBtn').onclick = async () => {
   const token = $('statusToken').value.trim();
   if(token) store.token = token;
-
   const res = await api('/api/factions/status', {api_token: token});
   out('statusOut', res);
   if(res.ok) showCountdown(res.faction);
@@ -138,13 +127,11 @@ function updatePaymentOptions(faction){
   const sel = $('payAmount');
   const hint = $('payPriceHint');
   if(!sel) return;
-
   const allowed = faction.allowed_payment_amounts || [];
   sel.innerHTML = allowed.length ? allowed.map((amount, idx) => {
     const days = (idx + 1) * 30;
     return `<option value="${amount}">${amount} Xanax = ${days} days</option>`;
-  }).join('') : '<option value="">Create banker keys first</option>';
-
+  }).join('') : '<option value="">Create active banker keys first</option>';
   if(hint){
     hint.textContent = `${faction.active_banker_keys || 0} active banker key(s). Cost: ${faction.monthly_cost_xanax || 0} Xanax every 30 days. Allowed now: ${allowed.length ? allowed.join(', ') : 'none'} Xanax.`;
   }
@@ -152,31 +139,24 @@ function updatePaymentOptions(faction){
 
 function showCountdown(faction){
   updatePaymentOptions(faction);
-
   if(countdownTimer) clearInterval(countdownTimer);
   const box = $('countdown');
-
   function tick(){
     const end = new Date(faction.active_until).getTime();
     const ms = end - Date.now();
-
     if(ms <= 0 || faction.locked){
       box.classList.add('locked');
-      box.textContent = 'LOCKED — payment verification needed';
+      box.textContent = `LOCKED — payment verification needed. Leaders may deactivate banker keys now.`;
       return;
     }
-
     box.classList.remove('locked');
-
     const s = Math.floor(ms/1000);
     const d = Math.floor(s/86400);
     const h = Math.floor((s%86400)/3600);
     const m = Math.floor((s%3600)/60);
     const sec = s%60;
-
-    box.textContent = `${d}d ${h}h ${m}m ${sec}s until next payment lock — ${faction.active_banker_keys || 0} active banker key(s), ${faction.monthly_cost_xanax || 0} Xanax / 30 days`;
+    box.textContent = `${d}d ${h}h ${m}m ${sec}s until next payment lock — ${faction.active_banker_keys || 0} active key(s), ${faction.monthly_cost_xanax || 0} Xanax / 30 days. Deactivate keys after countdown only.`;
   }
-
   tick();
   countdownTimer = setInterval(tick, 1000);
 }
@@ -184,25 +164,25 @@ function showCountdown(faction){
 async function renderBankerKeys(res){
   const box = $('bankerKeysList');
   if(!box) return;
-
   if(!res.ok){
     box.innerHTML = '<pre>'+escapeHtml(JSON.stringify(res,null,2))+'</pre>';
     return;
   }
-
+  const canDeactivate = !!(res.faction && res.faction.can_deactivate_keys_now);
   const keys = res.banker_keys || [];
-
   box.innerHTML = keys.map(k => `
     <div class="payment">
       <b>${escapeHtml(k.key_label || k.banker_name)}</b><br>
-      For: ${escapeHtml(k.banker_name)} ${k.banker_torn_id ? '('+escapeHtml(k.banker_torn_id)+')' : ''}<br>
-      Status: ${k.is_active ? 'active' : 'revoked'}<br>
+      For: ${escapeHtml(k.banker_name)} (${escapeHtml(k.banker_torn_id || '')})<br>
+      Status: ${k.is_active ? 'active / billing' : 'deactivated'}<br>
+      Connected devices: ${k.device_count || 0} | Notifications on: ${k.enabled_count || 0}<br>
       Key: <code>${escapeHtml(k.banker_key)}</code><br>
       Created: ${escapeHtml(k.created_at || '')}<br>
       <div class="row">
         <button onclick="copyText('${k.banker_key}')">Copy</button>
-        ${k.is_active ? `<button onclick="revokeBankerKey('${k.banker_key}')">Revoke</button>` : `<button onclick="enableBankerKey('${k.banker_key}')">Enable</button>`}
+        ${k.is_active ? `<button onclick="deactivateBankerKey('${k.banker_key}')">Deactivate</button>` : `<button onclick="enableBankerKey('${k.banker_key}')">Activate</button>`}
       </div>
+      ${k.is_active && !canDeactivate ? '<div class="small">Can only deactivate after the trial/renewal countdown ends.</div>' : ''}
     </div>
   `).join('') || '<p>No banker keys yet.</p>';
 }
@@ -210,7 +190,6 @@ async function renderBankerKeys(res){
 $('createBankerKeyBtn').onclick = async () => {
   const token = $('leaderKeyToken').value.trim();
   if(token) store.token = token;
-
   const res = await api('/api/banker-keys/create', {
     api_token: token,
     key_label: $('bankerKeyLabel').value,
@@ -218,9 +197,7 @@ $('createBankerKeyBtn').onclick = async () => {
     banker_torn_id: $('bankerKeyTornId').value,
     leader_api_key: $('leaderApiKey').value
   });
-
   out('bankerKeyOut', res);
-
   if(res.ok) {
     $('listBankerKeysBtn').click();
     $('statusBtn').click();
@@ -230,22 +207,19 @@ $('createBankerKeyBtn').onclick = async () => {
 $('listBankerKeysBtn').onclick = async () => {
   const token = $('leaderKeyToken').value.trim();
   if(token) store.token = token;
-
   const res = await api('/api/banker-keys/list', {
     api_token: token,
     leader_api_key: $('leaderApiKey').value
   });
-
   renderBankerKeys(res);
 };
 
-window.revokeBankerKey = async (bankerKey) => {
-  const res = await api('/api/banker-keys/revoke', {
+window.deactivateBankerKey = async (bankerKey) => {
+  const res = await api('/api/banker-keys/deactivate', {
     api_token:$('leaderKeyToken').value.trim(),
     leader_api_key:$('leaderApiKey').value,
     banker_key:bankerKey
   });
-
   out('bankerKeyOut', res);
   $('listBankerKeysBtn').click();
   $('statusBtn').click();
@@ -257,7 +231,6 @@ window.enableBankerKey = async (bankerKey) => {
     leader_api_key:$('leaderApiKey').value,
     banker_key:bankerKey
   });
-
   out('bankerKeyOut', res);
   $('listBankerKeysBtn').click();
   $('statusBtn').click();
@@ -272,47 +245,62 @@ window.copyText = async (txt) => {
   }
 };
 
+$('userStatusBtn').onclick = async () => {
+  const res = await api('/api/devices/status', {
+    api_token: $('deviceToken').value.trim(),
+    user_api_key: $('userApiKey').value.trim()
+  });
+  out('deviceOut', res);
+};
+
 $('enablePushBtn').onclick = async () => {
   if(!('serviceWorker' in navigator) || !('PushManager' in window)) {
     out('deviceOut', 'This browser does not support web push. On iPhone, add this page to Home Screen first.');
     return;
   }
-
   if(!window.TBP_CONFIG.vapidPublicKey){
     out('deviceOut', 'Server missing VAPID_PUBLIC_KEY. Set it in Render first.');
     return;
   }
-
   const reg = await navigator.serviceWorker.register('/static/sw.js');
   const permission = await Notification.requestPermission();
-
   if(permission !== 'granted'){
     out('deviceOut', 'Notifications were not allowed.');
     return;
   }
-
   const sub = await reg.pushManager.subscribe({
     userVisibleOnly:true,
     applicationServerKey:urlBase64ToUint8Array(window.TBP_CONFIG.vapidPublicKey)
   });
-
-  const token = $('deviceToken').value.trim();
-
   const res = await api('/api/devices/register', {
-    api_token: token,
-    name:$('deviceName').value,
-    torn_id:$('deviceTornId').value,
-    role:$('deviceRole').value,
+    api_token: $('deviceToken').value.trim(),
+    user_api_key: $('userApiKey').value.trim(),
     subscription:sub
   });
+  out('deviceOut', res);
+};
 
+$('disableNotifyBtn').onclick = async () => {
+  const res = await api('/api/devices/toggle', {
+    api_token: $('deviceToken').value.trim(),
+    user_api_key: $('userApiKey').value.trim(),
+    enabled: false
+  });
+  out('deviceOut', res);
+};
+
+$('enableNotifyBtn').onclick = async () => {
+  const res = await api('/api/devices/toggle', {
+    api_token: $('deviceToken').value.trim(),
+    user_api_key: $('userApiKey').value.trim(),
+    enabled: true
+  });
   out('deviceOut', res);
 };
 
 $('paymentBtn').onclick = async () => {
   const token = $('payToken').value.trim();
   if(token) store.token = token;
-
   const res = await api('/api/payments/claim', {
     api_token:token,
     claimed_by:$('payName').value,
@@ -320,33 +308,28 @@ $('paymentBtn').onclick = async () => {
     xanax_amount:$('payAmount').value,
     proof_text:$('payProof').value
   });
-
   out('paymentOut', res);
 };
 
 $('testBtn').onclick = async () => {
   const token = $('testToken').value.trim();
   if(token) store.token = token;
-
   const res = await api('/api/banking/request', {
     api_token:token,
     requester_name:$('testRequester').value || 'Test User',
     amount:$('testAmount').value || '$1',
     note:'Test alert from portal'
   });
-
   out('testOut', res);
 };
 
 $('adminPendingBtn').onclick = async () => {
   const pass = $('adminPass').value;
   const res = await api('/api/admin/payment/pending', {}, pass);
-
   if(!res.ok){
     $('pendingPayments').innerHTML = '<pre>'+JSON.stringify(res,null,2)+'</pre>';
     return;
   }
-
   $('pendingPayments').innerHTML = res.claims.map(c => `
     <div class="payment">
       <b>${c.faction_name}</b><br>
@@ -367,20 +350,17 @@ window.approveClaim = async (id) => {
     claim_id:id,
     reviewed_by:'Fries91'
   }, $('adminPass').value);
-
   alert(JSON.stringify(res, null, 2));
   $('adminPendingBtn').click();
 };
 
 window.rejectClaim = async (id) => {
   const note = prompt('Reject note?', 'Could not verify item send.');
-
   const res = await api('/api/admin/payment/reject', {
     claim_id:id,
     reviewed_by:'Fries91',
     admin_note:note
   }, $('adminPass').value);
-
   alert(JSON.stringify(res, null, 2));
   $('adminPendingBtn').click();
 };
