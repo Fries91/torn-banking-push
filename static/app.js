@@ -1,5 +1,16 @@
 const $ = (id) => document.getElementById(id);
 
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', async () => {
+    try {
+      await navigator.serviceWorker.register('/static/sw.js');
+      console.log('Service worker registered');
+    } catch (err) {
+      console.error('Service worker failed', err);
+    }
+  });
+}
+
 const store = {
   get token(){ return localStorage.getItem('tbp_token') || ''; },
   set token(v){ localStorage.setItem('tbp_token', v || ''); fillTokens(); }
@@ -15,29 +26,27 @@ function isiOS(){
 function updateInstallHelp(){
   const help = $('installHelp');
   if(!help) return;
+
   if(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches){
     help.textContent = 'App icon installed. Open Bank Push from your home screen.';
     return;
   }
+
   if(isiOS()){
-    help.textContent = 'iPhone/iPad: tap Share, then Add to Home Screen to make the app icon.';
+    help.textContent = 'iPhone/iPad: open in Safari, tap Share, then Add to Home Screen.';
   } else {
-    help.textContent = 'Android: tap Install app icon, or use browser menu → Add to Home screen.';
+    help.textContent = 'Android: tap Install app icon. If no popup appears, use browser menu → Add to Home screen.';
   }
 }
 
 window.addEventListener('beforeinstallprompt', (event) => {
   event.preventDefault();
   deferredInstallPrompt = event;
-  const btn = $('installAppBtn');
-  if(btn) btn.hidden = false;
   updateInstallHelp();
 });
 
 window.addEventListener('appinstalled', () => {
   deferredInstallPrompt = null;
-  const btn = $('installAppBtn');
-  if(btn) btn.hidden = true;
   updateInstallHelp();
 });
 
@@ -49,11 +58,14 @@ if($('installAppBtn')){
       deferredInstallPrompt.prompt();
       await deferredInstallPrompt.userChoice.catch(()=>null);
       deferredInstallPrompt = null;
-      $('installAppBtn').hidden = true;
       updateInstallHelp();
       return;
     }
-    alert(isiOS() ? 'Tap Share, then Add to Home Screen.' : 'Use your browser menu and tap Install app or Add to Home screen.');
+
+    alert(isiOS()
+      ? 'On iPhone/iPad: open this page in Safari, tap Share, then Add to Home Screen.'
+      : 'If the install popup does not appear, use Chrome menu ⋮ then Add to Home screen or Install app.'
+    );
   };
 }
 
@@ -82,11 +94,13 @@ function out(id, obj){
 async function api(path, body, adminPass){
   const headers = {'Content-Type':'application/json'};
   if(adminPass) headers['X-Admin-Password'] = adminPass;
+
   const res = await fetch(path, {
     method:'POST',
     headers,
     body: JSON.stringify(body || {})
   });
+
   const json = await res.json().catch(()=>({ok:false,error:'bad_json'}));
   if(!res.ok && !json.error) json.error = 'HTTP ' + res.status;
   return json;
@@ -105,6 +119,7 @@ $('registerFactionBtn').onclick = async () => {
     faction_name: $('regFactionName').value,
     leader_api_key: $('regLeaderApiKey').value
   });
+
   if(res.ok && res.faction && res.faction.api_token) store.token = res.faction.api_token;
   out('registerOut', res);
   if(res.ok) showCountdown(res.faction);
@@ -113,6 +128,7 @@ $('registerFactionBtn').onclick = async () => {
 $('statusBtn').onclick = async () => {
   const token = $('statusToken').value.trim();
   if(token) store.token = token;
+
   const res = await api('/api/factions/status', {api_token: token});
   out('statusOut', res);
   if(res.ok) showCountdown(res.faction);
