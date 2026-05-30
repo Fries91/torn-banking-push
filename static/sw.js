@@ -28,7 +28,9 @@ self.addEventListener('push', event => {
       badge: '/static/icon-192.png',
       tag: payload.data?.alert_id || 'tbp-alert',
       data: payload.data || {},
-      requireInteraction: true
+      requireInteraction: true,
+      vibrate: [300, 150, 300, 150, 500],
+      renotify: true
     })
   );
 });
