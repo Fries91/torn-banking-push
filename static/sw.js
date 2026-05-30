@@ -1,13 +1,25 @@
+self.addEventListener('install', event => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(self.clients.claim());
+});
+
+self.addEventListener('fetch', event => {
+  event.respondWith(fetch(event.request));
+});
+
 self.addEventListener('push', event => {
   let payload = {
-    title:'Torn Banking Push',
-    body:'New banking alert',
-    data:{url:'/'}
+    title: 'Torn Banking Push',
+    body: 'New banking alert',
+    data: { url: '/' }
   };
 
   try {
     payload = event.data.json();
-  } catch(e) {}
+  } catch (e) {}
 
   event.waitUntil(
     self.registration.showNotification(payload.title || 'Torn Banking Push', {
@@ -28,11 +40,11 @@ self.addEventListener('notificationclick', event => {
 
   event.waitUntil(
     clients.matchAll({
-      type:'window',
-      includeUncontrolled:true
+      type: 'window',
+      includeUncontrolled: true
     }).then(list => {
-      for(const client of list){
-        if('focus' in client) return client.focus();
+      for (const client of list) {
+        if ('focus' in client) return client.focus();
       }
       return clients.openWindow(url);
     })
