@@ -796,13 +796,51 @@ def admin_keys():
 def admin_key_toggle():
     if not require_admin():
         return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+
     data = request.get_json(force=True)
     token = (data.get('premium_key') or '').strip()
     enabled = 1 if bool(data.get('enabled')) else 0
+
+    row = get_key(token)
+    if not row:
+        return jsonify({'ok': False, 'error': 'Premium key not found'}), 404
+
+    now = utcnow()
+
     with db() as con:
-        con.execute('UPDATE premium_keys SET is_active=? WHERE premium_key=?', (enabled, token))
-        row = con.execute('SELECT * FROM premium_keys WHERE premium_key=?', (token,)).fetchone()
-    return jsonify({'ok': True, 'key': public_key(row) if row else None})
+        if enabled:
+            current_until = parse_dt(row['paid_until'])
+            start = max(current_until, now)
+            new_until = start + timedelta(days=30)
+
+            con.execute(
+                '''
+                UPDATE premium_keys
+                SET is_active=1, paid_until=?
+                WHERE premium_key=?
+                ''',
+                (iso(new_until), token)
+            )
+        else:
+            con.execute(
+                '''
+                UPDATE premium_keys
+                SET is_active=0
+                WHERE premium_key=?
+                ''',
+                (token,)
+            )
+
+        updated = con.execute(
+            'SELECT * FROM premium_keys WHERE premium_key=?',
+            (token,)
+        ).fetchone()
+
+    return jsonify({
+        'ok': True,
+        'message': 'Key activated for 30 days.' if enabled else 'Key locked.',
+        'key': public_key(updated)
+    })
 
 
 if __name__ == '__main__':
