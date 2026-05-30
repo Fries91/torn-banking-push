@@ -18,42 +18,41 @@
   <main class="wrap">
     <section class="hero card">
       <div>
-        <div class="kicker">Torn faction banking alerts</div>
+        <div class="kicker">Premium Torn banking phone alerts</div>
         <h1>🪙 {{ app_name }}</h1>
-        <p>Faction leaders generate one private banker key per Torn ID. Users connect their own phone with their key and Torn API key, then banking scripts can ping that exact phone.</p>
+        <p>Reserve your premium key, send the Xanax payment to Fries91, then the app scans Fries91’s Torn events and activates or extends your phone-ping key automatically.</p>
       </div>
       <div class="heroActions">
-        <div class="badge">14-day free trial</div>
+        <div class="badge">Premium add-on</div>
         <button id="installAppBtn" class="installBtn">📲 Install app icon</button>
         <div id="installHelp" class="small installHelp">Open this page on your phone, then install it to make a clickable app icon.</div>
       </div>
     </section>
 
     <section class="card notice">
-      <b>Payment rule:</b> Each active banker key costs <b>2 Xanax every 30 days</b>. Leaders can only deactivate paid keys after the current trial/renewal countdown ends. Before then, the key stays active and still counts toward payment.
+      <b>Payment rule:</b> 2 Xanax = 30 days, 4 Xanax = 60 days, 6 Xanax = 90 days, 8 Xanax = 120 days. Send payment to Fries91, then use the scan/check tools below.
     </section>
 
     <div class="tabs">
-      <button class="tab active" data-tab="leadersTab">Leaders</button>
-      <button class="tab" data-tab="usersTab">Users</button>
+      <button class="tab active" data-tab="usersTab">Users</button>
+      <button class="tab" data-tab="adminTab">Fries91 Admin</button>
     </div>
 
-    <section id="leadersTab" class="tabPanel active">
+    <section id="usersTab" class="tabPanel active">
       <section class="grid">
         <div class="card">
-          <h2>1) Leader creates faction push key</h2>
-          <label>Faction ID <input id="regFactionId" placeholder="49384" /></label>
-          <label>Faction name <input id="regFactionName" placeholder="7DS*: Wrath" /></label>
-          <label>Leader Torn API key <input id="regLeaderApiKey" type="password" placeholder="Leader key only, not stored" /></label>
-          <p class="small">The app verifies this key belongs to the Torn faction leader. It is not saved.</p>
-          <button id="registerFactionBtn">Verify leader + create/get faction key</button>
-          <pre id="registerOut"></pre>
+          <h2>1) Get/reserve your premium key</h2>
+          <label>Your Torn name <input id="reserveName" placeholder="Your Torn name" /></label>
+          <label>Your Torn ID <input id="reserveTornId" placeholder="Your Torn ID" /></label>
+          <button id="reserveKeyBtn">Get/reserve premium key</button>
+          <button id="findKeyBtn">Find my key by Torn ID</button>
+          <pre id="reserveOut"></pre>
         </div>
 
         <div class="card">
-          <h2>2) Check countdown/payment</h2>
-          <label>Faction push key <input id="statusToken" placeholder="tbp_..." /></label>
-          <button id="statusBtn">Check key status</button>
+          <h2>2) Check key status</h2>
+          <label>Premium key <input id="statusKey" placeholder="premium_..." /></label>
+          <button id="statusBtn">Check key</button>
           <div id="countdown" class="countdown">No key loaded.</div>
           <pre id="statusOut"></pre>
         </div>
@@ -61,68 +60,71 @@
 
       <section class="grid">
         <div class="card">
-          <h2>3) Generate banker/user key</h2>
-          <label>Faction push key <input id="leaderKeyToken" placeholder="tbp_..." /></label>
-          <label>Leader Torn API key <input id="leaderApiKey" type="password" placeholder="Required every time, not stored" /></label>
-          <label>Banker Torn ID <input id="bankerKeyTornId" placeholder="Required" /></label>
-          <label>Banker name <input id="bankerKeyName" placeholder="Banker/user name" /></label>
-          <label>Key label <input id="bankerKeyLabel" placeholder="Example: Night banker / Vault pay" /></label>
-          <button id="createBankerKeyBtn">Generate unique banker key</button>
-          <button id="listBankerKeysBtn">Refresh my banker keys</button>
-          <div id="bankerKeysList"></div>
-          <pre id="bankerKeyOut"></pre>
+          <h2>3) Submit manual proof if needed</h2>
+          <label>Premium key <input id="payKey" placeholder="premium_..." /></label>
+          <label>Your Torn name <input id="payName" placeholder="Who sent the Xanax" /></label>
+          <label>Your Torn ID <input id="payTornId" placeholder="Required for auto scan matching" /></label>
+          <label>Xanax sent
+            <select id="payAmount">
+              <option value="2">2 Xanax = 30 days</option>
+              <option value="4">4 Xanax = 60 days</option>
+              <option value="6">6 Xanax = 90 days</option>
+              <option value="8">8 Xanax = 120 days</option>
+            </select>
+          </label>
+          <label>Proof / note <textarea id="payProof" placeholder="Paste Torn event text if auto-scan misses it"></textarea></label>
+          <button id="paymentBtn">Submit payment proof</button>
+          <pre id="paymentOut"></pre>
         </div>
-      </section>
-    </section>
 
-    <section id="usersTab" class="tabPanel">
-      <section class="grid">
         <div class="card">
-          <h2>1) User connects phone</h2>
-          <p class="small">Enter the banker_ key from your leader and your own Torn API key. The API key is only used to verify this key belongs to your Torn ID and faction.</p>
-          <label>Your banker key <input id="deviceToken" placeholder="banker_..." /></label>
-          <label>Your Torn API key <input id="userApiKey" type="password" placeholder="Your key, not stored" /></label>
-          <button id="userStatusBtn">Check my key</button>
+          <h2>4) Enable phone alerts</h2>
+          <p class="small">Your premium key must be active before phone alerts can be enabled.</p>
+          <label>Premium key <input id="deviceKey" placeholder="premium_..." /></label>
+          <label>Device name <input id="deviceName" placeholder="My phone" /></label>
           <button id="enablePushBtn">Enable phone alerts</button>
           <button id="disableNotifyBtn">Deactivate my notifications</button>
           <button id="enableNotifyBtn">Activate my notifications</button>
           <pre id="deviceOut"></pre>
         </div>
       </section>
+
+      <section class="grid">
+        <div class="card">
+          <h2>5) Test notification</h2>
+          <label>Premium key <input id="testKey" placeholder="premium_..." /></label>
+          <label>Requester <input id="testRequester" placeholder="Fries91" /></label>
+          <label>Amount <input id="testAmount" placeholder="$25,000,000" /></label>
+          <button id="testBtn">Send test alert</button>
+          <pre id="testOut"></pre>
+        </div>
+      </section>
     </section>
 
-    <section class="grid">
-      <div class="card">
-        <h2>Submit payment verification</h2>
-        <label>Faction push key <input id="payToken" placeholder="tbp_..." /></label>
-        <label>Your Torn name <input id="payName" placeholder="Who sent the Xanax" /></label>
-        <label>Your Torn ID <input id="payTornId" placeholder="optional" /></label>
-        <div class="small" id="payPriceHint">Check countdown first to load the allowed payment amounts.</div>
-        <label>Xanax sent
-          <select id="payAmount"><option value="">Check faction status first</option></select>
-        </label>
-        <label>Proof / note <textarea id="payProof" placeholder="Paste Torn event text or transaction note here"></textarea></label>
-        <button id="paymentBtn">Submit for Fries91 approval</button>
-        <pre id="paymentOut"></pre>
-      </div>
+    <section id="adminTab" class="tabPanel">
+      <section class="grid">
+        <div class="card admin">
+          <h2>Fries91 auto-scan</h2>
+          <label>Admin password <input id="adminPass" type="password" placeholder="ADMIN_PASSWORD" /></label>
+          <button id="scanNowBtn">Scan Fries91 events now</button>
+          <button id="scanStatusBtn">Scan status/history</button>
+          <pre id="scanOut"></pre>
+        </div>
 
-      <div class="card">
-        <h2>Test notification</h2>
-        <label>Faction key or banker key <input id="testToken" placeholder="tbp_... or banker_..." /></label>
-        <label>Requester <input id="testRequester" placeholder="Fries91" /></label>
-        <label>Amount <input id="testAmount" placeholder="$25,000,000" /></label>
-        <button id="testBtn">Send test alert</button>
-        <pre id="testOut"></pre>
-      </div>
-    </section>
+        <div class="card admin">
+          <h2>Manual claims</h2>
+          <button id="adminPendingBtn">Show pending manual claims</button>
+          <div id="pendingPayments"></div>
+        </div>
+      </section>
 
-    <section class="grid">
-      <div class="card admin">
-        <h2>Fries91 admin</h2>
-        <label>Admin password <input id="adminPass" type="password" placeholder="ADMIN_PASSWORD" /></label>
-        <button id="adminPendingBtn">Show pending payments</button>
-        <div id="pendingPayments"></div>
-      </div>
+      <section class="grid">
+        <div class="card admin">
+          <h2>Premium keys</h2>
+          <button id="adminKeysBtn">Show all keys</button>
+          <div id="adminKeysList"></div>
+        </div>
+      </section>
     </section>
   </main>
 
