@@ -83,6 +83,8 @@ def init_db():
             subscription_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
             last_seen TEXT NOT NULL,
+            banker_key TEXT,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
             UNIQUE(faction_id, torn_id, role),
             FOREIGN KEY(faction_id) REFERENCES factions(faction_id)
         );
@@ -113,6 +115,9 @@ def init_db():
             reviewed_by TEXT,
             admin_note TEXT,
             days_added INTEGER DEFAULT 0,
+            active_banker_keys_at_claim INTEGER DEFAULT 0,
+            monthly_cost_at_claim INTEGER DEFAULT 0,
+            months_paid INTEGER DEFAULT 0,
             FOREIGN KEY(faction_id) REFERENCES factions(faction_id)
         );
         CREATE TABLE IF NOT EXISTS banker_keys (
@@ -120,7 +125,7 @@ def init_db():
             faction_id TEXT NOT NULL,
             key_label TEXT,
             banker_name TEXT NOT NULL,
-            banker_torn_id TEXT,
+            banker_torn_id TEXT NOT NULL,
             banker_key TEXT UNIQUE NOT NULL,
             created_by TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
@@ -132,10 +137,15 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_alerts_faction_status ON alerts(faction_id, status);
         CREATE INDEX IF NOT EXISTS idx_claims_status ON payment_claims(status);
         CREATE INDEX IF NOT EXISTS idx_banker_keys_faction ON banker_keys(faction_id, is_active);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_one_key_per_banker ON banker_keys(faction_id, banker_torn_id);
         ''')
-        cols = [r['name'] for r in con.execute('PRAGMA table_info(devices)').fetchall()]
-        if 'banker_key' not in cols:
+
+        # Safe migrations for older installs
+        device_cols = [r['name'] for r in con.execute('PRAGMA table_info(devices)').fetchall()]
+        if 'banker_key' not in device_cols:
             con.execute('ALTER TABLE devices ADD COLUMN banker_key TEXT')
+        if 'is_enabled' not in device_cols:
+            con.execute('ALTER TABLE devices ADD COLUMN is_enabled INTEGER NOT NULL DEFAULT 1')
         claim_cols = [r['name'] for r in con.execute('PRAGMA table_info(payment_claims)').fetchall()]
         if 'active_banker_keys_at_claim' not in claim_cols:
             con.execute('ALTER TABLE payment_claims ADD COLUMN active_banker_keys_at_claim INTEGER DEFAULT 0')
@@ -146,15 +156,27 @@ def init_db():
         faction_cols = [r['name'] for r in con.execute('PRAGMA table_info(factions)').fetchall()]
         if 'leader_verified_at' not in faction_cols:
             con.execute('ALTER TABLE factions ADD COLUMN leader_verified_at TEXT')
-
         banker_cols = [r['name'] for r in con.execute('PRAGMA table_info(banker_keys)').fetchall()]
         if 'key_label' not in banker_cols:
             con.execute('ALTER TABLE banker_keys ADD COLUMN key_label TEXT')
+        if 'banker_torn_id' not in banker_cols:
+            con.execute('ALTER TABLE banker_keys ADD COLUMN banker_torn_id TEXT')
 
 
 @app.before_request
 def _boot():
     init_db()
+
+
+def faction_active_until(row):
+    trial_until = parse_dt(row['trial_until'])
+    paid_until = parse_dt(row['paid_until']) if row['paid_until'] else None
+    return max([d for d in [trial_until, paid_until] if d])
+
+
+def can_change_paid_keys(row):
+    # Leaders can deactivate paid-counting keys only after the trial/renewal countdown reaches zero.
+    return faction_active_until(row) <= utcnow()
 
 
 def count_active_banker_keys(faction_id):
@@ -177,9 +199,7 @@ def pricing_for_faction(faction_id):
 
 
 def public_faction(row):
-    trial_until = parse_dt(row['trial_until'])
-    paid_until = parse_dt(row['paid_until']) if row['paid_until'] else None
-    active_until = max([d for d in [trial_until, paid_until] if d])
+    active_until = faction_active_until(row)
     now = utcnow()
     locked_by_time = active_until <= now
     locked = bool(row['locked']) or locked_by_time
@@ -197,6 +217,7 @@ def public_faction(row):
         'active_until': iso(active_until),
         'seconds_left': seconds_left,
         'locked': locked,
+        'can_deactivate_keys_now': can_change_paid_keys(row),
         **pricing_for_faction(row['faction_id']),
     }
 
@@ -208,7 +229,9 @@ def get_faction_by_token(token):
 
 def get_banker_key(token):
     with db() as con:
-        return con.execute('SELECT bk.*, f.faction_name, f.api_token, f.leader_name, f.trial_until, f.paid_until, f.locked, f.created_at, f.leader_torn_id FROM banker_keys bk JOIN factions f ON f.faction_id=bk.faction_id WHERE bk.banker_key=?', (token,)).fetchone()
+        return con.execute('''SELECT bk.*, f.faction_name, f.api_token, f.leader_name, f.trial_until, f.paid_until, f.locked, f.created_at, f.leader_torn_id
+                              FROM banker_keys bk JOIN factions f ON f.faction_id=bk.faction_id
+                              WHERE bk.banker_key=?''', (token,)).fetchone()
 
 
 def public_banker_key(row):
@@ -241,9 +264,6 @@ def torn_api_get(path, key, params=None):
 
 
 def verify_torn_faction_leader(faction_id, leader_api_key):
-    """Verify the supplied Torn API key belongs to the actual leader of this faction.
-    The key is not stored; it is only used for this check.
-    """
     if not leader_api_key:
         return {'ok': False, 'error': 'leader_torn_api_key_required'}
     profile = torn_api_get('/user/', leader_api_key, {'selections': 'profile'})
@@ -262,6 +282,24 @@ def verify_torn_faction_leader(faction_id, leader_api_key):
     return {'ok': True, 'player_id': player_id, 'name': name, 'position': position, 'faction_id': user_faction_id}
 
 
+def verify_torn_user_for_banker_key(banker_row, user_api_key):
+    if not user_api_key:
+        return {'ok': False, 'error': 'user_torn_api_key_required'}
+    profile = torn_api_get('/user/', user_api_key, {'selections': 'profile'})
+    if not profile.get('ok'):
+        return profile
+    data = profile['data']
+    player_id = str(data.get('player_id') or data.get('id') or '').strip()
+    name = str(data.get('name') or '').strip()
+    faction = data.get('faction') or {}
+    user_faction_id = str(faction.get('faction_id') or faction.get('id') or '').strip()
+    if user_faction_id != str(banker_row['faction_id']):
+        return {'ok': False, 'error': 'api_key_not_for_this_faction', 'player_id': player_id, 'name': name, 'faction_id': user_faction_id}
+    if str(banker_row['banker_torn_id']) and str(banker_row['banker_torn_id']) != player_id:
+        return {'ok': False, 'error': 'api_key_does_not_match_this_banker_key', 'player_id': player_id, 'name': name, 'expected_torn_id': banker_row['banker_torn_id']}
+    return {'ok': True, 'player_id': player_id, 'name': name, 'faction_id': user_faction_id}
+
+
 def require_verified_leader_for_faction(row, leader_api_key):
     check = verify_torn_faction_leader(row['faction_id'], leader_api_key)
     if not check.get('ok'):
@@ -276,7 +314,9 @@ def require_verified_leader_for_faction(row, leader_api_key):
 def require_admin(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        password = request.headers.get('X-Admin-Password') or request.json.get('admin_password') if request.is_json else request.headers.get('X-Admin-Password')
+        password = request.headers.get('X-Admin-Password')
+        if not password and request.is_json:
+            password = (request.json or {}).get('admin_password')
         if password != ADMIN_PASSWORD:
             return jsonify({'ok': False, 'error': 'admin_auth_failed'}), 401
         return fn(*args, **kwargs)
@@ -290,15 +330,9 @@ def index():
 
 @app.get('/api/config')
 def config():
-    return jsonify({
-        'ok': True,
-        'app_name': APP_NAME,
-        'base_url': BASE_URL,
-        'vapid_public_key': VAPID_PUBLIC_KEY,
-        'trial_days': TRIAL_DAYS,
-        'xanax_per_banker_key_30_days': XANAX_PER_BANKER_KEY_30_DAYS,
-        'max_payment_months': MAX_PAYMENT_MONTHS,
-    })
+    return jsonify({'ok': True, 'app_name': APP_NAME, 'base_url': BASE_URL, 'vapid_public_key': VAPID_PUBLIC_KEY,
+                    'trial_days': TRIAL_DAYS, 'xanax_per_banker_key_30_days': XANAX_PER_BANKER_KEY_30_DAYS,
+                    'max_payment_months': MAX_PAYMENT_MONTHS})
 
 
 @app.post('/api/factions/register')
@@ -309,26 +343,23 @@ def register_faction():
     leader_api_key = str(data.get('leader_api_key', '')).strip()
     if not faction_id or not faction_name or not leader_api_key:
         return jsonify({'ok': False, 'error': 'faction_id, faction_name, and leader_torn_api_key are required'}), 400
-
     leader_check = verify_torn_faction_leader(faction_id, leader_api_key)
     if not leader_check.get('ok'):
         return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
-
     now = utcnow()
     token = 'tbp_' + uuid.uuid4().hex + uuid.uuid4().hex[:12]
     trial_until = now + timedelta(days=TRIAL_DAYS)
-    leader_name = leader_check.get('name') or str(data.get('leader_name', '')).strip() or 'Faction Leader'
-    leader_torn_id = leader_check.get('player_id') or str(data.get('leader_torn_id', '')).strip()
+    leader_name = leader_check.get('name') or 'Faction Leader'
+    leader_torn_id = leader_check.get('player_id') or ''
     with db() as con:
         existing = con.execute('SELECT * FROM factions WHERE faction_id=?', (faction_id,)).fetchone()
         if existing:
-            con.execute('UPDATE factions SET leader_name=?, leader_torn_id=?, leader_verified_at=? WHERE faction_id=?',
-                        (leader_name, leader_torn_id, iso(now), faction_id))
+            con.execute('UPDATE factions SET faction_name=?, leader_name=?, leader_torn_id=?, leader_verified_at=? WHERE faction_id=?',
+                        (faction_name, leader_name, leader_torn_id, iso(now), faction_id))
             existing = con.execute('SELECT * FROM factions WHERE faction_id=?', (faction_id,)).fetchone()
             return jsonify({'ok': True, 'faction': public_faction(existing), 'message': 'Leader verified. Existing faction key returned.'})
-        con.execute("""INSERT INTO factions(faction_id, faction_name, leader_name, leader_torn_id, leader_verified_at, api_token, created_at, trial_until)
-                       VALUES(?,?,?,?,?,?,?,?)""",
-                    (faction_id, faction_name, leader_name, leader_torn_id, iso(now), token, iso(now), iso(trial_until)))
+        con.execute('''INSERT INTO factions(faction_id, faction_name, leader_name, leader_torn_id, leader_verified_at, api_token, created_at, trial_until)
+                       VALUES(?,?,?,?,?,?,?,?)''', (faction_id, faction_name, leader_name, leader_torn_id, iso(now), token, iso(now), iso(trial_until)))
         row = con.execute('SELECT * FROM factions WHERE faction_id=?', (faction_id,)).fetchone()
     return jsonify({'ok': True, 'faction': public_faction(row), 'message': f'Leader verified. Free {TRIAL_DAYS}-day trial started.'})
 
@@ -343,13 +374,12 @@ def faction_status():
     with db() as con:
         active_alerts = con.execute('SELECT COUNT(*) c FROM alerts WHERE faction_id=? AND status="active"', (row['faction_id'],)).fetchone()['c']
         bankers = con.execute('SELECT COUNT(*) c FROM devices WHERE faction_id=? AND role="banker"', (row['faction_id'],)).fetchone()['c']
-        active_banker_keys = con.execute('SELECT COUNT(*) c FROM banker_keys WHERE faction_id=? AND is_active=1', (row['faction_id'],)).fetchone()['c']
+        enabled_bankers = con.execute('SELECT COUNT(*) c FROM devices WHERE faction_id=? AND role="banker" AND is_enabled=1', (row['faction_id'],)).fetchone()['c']
         total_banker_keys = con.execute('SELECT COUNT(*) c FROM banker_keys WHERE faction_id=?', (row['faction_id'],)).fetchone()['c']
         pending = con.execute('SELECT COUNT(*) c FROM payment_claims WHERE faction_id=? AND status="pending"', (row['faction_id'],)).fetchone()['c']
     out = public_faction(row)
-    out.update({'active_alerts': active_alerts, 'registered_bankers': bankers, 'active_banker_keys': active_banker_keys, 'total_banker_keys': total_banker_keys, 'pending_payments': pending})
+    out.update({'active_alerts': active_alerts, 'registered_bankers': bankers, 'enabled_bankers': enabled_bankers, 'total_banker_keys': total_banker_keys, 'pending_payments': pending})
     return jsonify({'ok': True, 'faction': out})
-
 
 
 @app.post('/api/banker-keys/create')
@@ -363,26 +393,22 @@ def create_banker_key():
     leader_check = require_verified_leader_for_faction(row, leader_api_key)
     if not leader_check.get('ok'):
         return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
-
     key_label = str(data.get('key_label', '')).strip()
     banker_name = str(data.get('banker_name', '')).strip()
     banker_torn_id = str(data.get('banker_torn_id', '')).strip()
-    created_by = leader_check.get('name') or row['leader_name']
+    if not banker_torn_id:
+        return jsonify({'ok': False, 'error': 'banker_torn_id is required so one key per banker can be enforced'}), 400
     if not banker_name:
-        return jsonify({'ok': False, 'error': 'banker_name is required'}), 400
-
+        banker_name = f'Torn ID {banker_torn_id}'
     with db() as con:
-        if banker_torn_id:
-            existing = con.execute('SELECT * FROM banker_keys WHERE faction_id=? AND banker_torn_id=?', (row['faction_id'], banker_torn_id)).fetchone()
-        else:
-            existing = con.execute('SELECT * FROM banker_keys WHERE faction_id=? AND lower(banker_name)=lower(?)', (row['faction_id'], banker_name)).fetchone()
+        existing = con.execute('SELECT * FROM banker_keys WHERE faction_id=? AND banker_torn_id=?', (row['faction_id'], banker_torn_id)).fetchone()
         if existing:
-            return jsonify({'ok': True, 'banker_key': public_banker_key(existing), 'message': 'This banker/user already has a key. One key per banker is enforced.'})
+            return jsonify({'ok': True, 'banker_key': public_banker_key(existing), 'message': 'This Torn ID already has a key. No duplicate key was created.'})
         key = 'banker_' + uuid.uuid4().hex + uuid.uuid4().hex[:8]
-        con.execute("""INSERT INTO banker_keys(faction_id, key_label, banker_name, banker_torn_id, banker_key, created_by, created_at)
-                       VALUES(?,?,?,?,?,?,?)""", (row['faction_id'], key_label or banker_name, banker_name, banker_torn_id, key, created_by, iso(utcnow())))
+        con.execute('''INSERT INTO banker_keys(faction_id, key_label, banker_name, banker_torn_id, banker_key, created_by, created_at)
+                       VALUES(?,?,?,?,?,?,?)''', (row['faction_id'], key_label or banker_name, banker_name, banker_torn_id, key, leader_check.get('name') or row['leader_name'], iso(utcnow())))
         bk = con.execute('SELECT * FROM banker_keys WHERE banker_key=?', (key,)).fetchone()
-    return jsonify({'ok': True, 'banker_key': public_banker_key(bk), 'message': 'Give this key only to that banker/user. They open the Users tab, paste the key, and enable phone alerts.'})
+    return jsonify({'ok': True, 'banker_key': public_banker_key(bk), 'faction': public_faction(row), 'message': 'Key created. Give this key to that banker/user only.'})
 
 
 @app.post('/api/banker-keys/list')
@@ -398,11 +424,14 @@ def list_banker_keys():
         return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
     with db() as con:
         keys = [public_banker_key(r) for r in con.execute('SELECT * FROM banker_keys WHERE faction_id=? ORDER BY created_at DESC', (row['faction_id'],)).fetchall()]
-    return jsonify({'ok': True, 'banker_keys': keys, 'faction': public_faction(row)})
+        connected = {r['banker_key']: {'device_count': r['c'], 'enabled_count': r['enabled']} for r in con.execute('SELECT banker_key, COUNT(*) c, SUM(is_enabled) enabled FROM devices WHERE faction_id=? AND banker_key IS NOT NULL GROUP BY banker_key', (row['faction_id'],)).fetchall()}
+    for k in keys:
+        k.update(connected.get(k['banker_key'], {'device_count': 0, 'enabled_count': 0}))
+    return jsonify({'ok': True, 'banker_keys': keys, 'faction': public_faction(row), 'message': 'Only your faction keys are shown.'})
 
 
-@app.post('/api/banker-keys/revoke')
-def revoke_banker_key():
+@app.post('/api/banker-keys/deactivate')
+def deactivate_banker_key():
     data = request.get_json(force=True)
     token = str(data.get('api_token', '')).strip()
     leader_api_key = str(data.get('leader_api_key', '')).strip()
@@ -413,10 +442,17 @@ def revoke_banker_key():
     leader_check = require_verified_leader_for_faction(row, leader_api_key)
     if not leader_check.get('ok'):
         return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
+    if not can_change_paid_keys(row):
+        return jsonify({'ok': False, 'error': 'cannot_deactivate_until_renewal_or_trial_end', 'active_until': public_faction(row)['active_until'], 'message': 'This key stays active and counts toward payment until the current renewal/trial countdown ends.'}), 400
     with db() as con:
         con.execute('UPDATE banker_keys SET is_active=0 WHERE faction_id=? AND banker_key=?', (row['faction_id'], banker_key))
-        con.execute('DELETE FROM devices WHERE faction_id=? AND banker_key=?', (row['faction_id'], banker_key))
-    return jsonify({'ok': True, 'message': 'Banker key revoked and connected devices removed.'})
+        con.execute('UPDATE devices SET is_enabled=0 WHERE faction_id=? AND banker_key=?', (row['faction_id'], banker_key))
+    return jsonify({'ok': True, 'message': 'Banker key deactivated. Notifications are off for that key.'})
+
+
+@app.post('/api/banker-keys/revoke')
+def revoke_alias():
+    return deactivate_banker_key()
 
 
 @app.post('/api/banker-keys/enable')
@@ -433,50 +469,64 @@ def enable_banker_key():
         return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
     with db() as con:
         con.execute('UPDATE banker_keys SET is_active=1 WHERE faction_id=? AND banker_key=?', (row['faction_id'], banker_key))
-    return jsonify({'ok': True, 'message': 'Banker key enabled.'})
+    return jsonify({'ok': True, 'message': 'Banker key enabled and will count toward payment.'})
+
+
+@app.post('/api/devices/status')
+def device_status():
+    data = request.get_json(force=True)
+    banker_key = str(data.get('api_token', '')).strip()
+    user_api_key = str(data.get('user_api_key', '')).strip()
+    bk = get_banker_key(banker_key)
+    if not bk:
+        return jsonify({'ok': False, 'error': 'invalid_banker_key'}), 404
+    check = verify_torn_user_for_banker_key(bk, user_api_key)
+    if not check.get('ok'):
+        return jsonify({'ok': False, 'error': 'user_verification_failed', 'details': check}), 403
+    with db() as con:
+        dev = con.execute('SELECT * FROM devices WHERE faction_id=? AND banker_key=? AND torn_id=?', (bk['faction_id'], banker_key, check['player_id'])).fetchone()
+    return jsonify({'ok': True, 'banker_key': public_banker_key(bk), 'user': check, 'device_connected': bool(dev), 'notifications_enabled': bool(dev['is_enabled']) if dev else False})
 
 
 @app.post('/api/devices/register')
 def register_device():
     data = request.get_json(force=True)
     token = str(data.get('api_token', '')).strip()
-    row = get_faction_by_token(token)
-    banker_key_row = None
-    banker_key_value = None
-    if not row:
-        banker_key_row = get_banker_key(token)
-        if not banker_key_row or not banker_key_row['is_active']:
-            return jsonify({'ok': False, 'error': 'invalid_or_inactive_banker_key'}), 404
-        row = get_faction_by_token(banker_key_row['api_token'])
-        banker_key_value = token
-    role = str(data.get('role', 'banker')).strip().lower()
-    if banker_key_row:
-        # A banker/user key can only register the phone assigned to that key.
-        # The user cannot self-promote into leader/admin from the Users tab.
-        role = 'banker'
-    else:
-        # Direct faction-key phone registration is leader-only. This prevents a copied faction key
-        # from being used by random users to register banker/admin phones.
-        if role != 'leader':
-            return jsonify({'ok': False, 'error': 'use_a_banker_key_to_register_user_phone'}), 403
-        leader_api_key = str(data.get('leader_api_key', '')).strip()
-        leader_check = require_verified_leader_for_faction(row, leader_api_key)
-        if not leader_check.get('ok'):
-            return jsonify({'ok': False, 'error': 'leader_verification_failed', 'details': leader_check}), 403
-    if role not in ['banker', 'leader']:
-        return jsonify({'ok': False, 'error': 'role must be banker or leader'}), 400
-    name = str(data.get('name', '')).strip() or (banker_key_row['banker_name'] if banker_key_row else (leader_check.get('name') if 'leader_check' in locals() else 'Unknown'))
-    torn_id = str(data.get('torn_id', '')).strip() or (banker_key_row['banker_torn_id'] if banker_key_row else (leader_check.get('player_id') if 'leader_check' in locals() else None))
+    user_api_key = str(data.get('user_api_key', '')).strip()
+    bk = get_banker_key(token)
+    if not bk or not bk['is_active']:
+        return jsonify({'ok': False, 'error': 'invalid_or_inactive_banker_key'}), 404
+    user_check = verify_torn_user_for_banker_key(bk, user_api_key)
+    if not user_check.get('ok'):
+        return jsonify({'ok': False, 'error': 'user_verification_failed', 'details': user_check}), 403
     sub = data.get('subscription')
     if not sub:
         return jsonify({'ok': False, 'error': 'missing push subscription'}), 400
     now = iso(utcnow())
     with db() as con:
-        con.execute('''INSERT OR REPLACE INTO devices(faction_id, torn_id, name, role, subscription_json, created_at, last_seen, banker_key)
-                       VALUES(?,?,?,?,?,?,?,?)''', (row['faction_id'], torn_id or f'anon-{uuid.uuid4().hex[:12]}', name, role, json.dumps(sub), now, now, banker_key_value))
-        if banker_key_value:
-            con.execute('UPDATE banker_keys SET last_used=? WHERE banker_key=?', (now, banker_key_value))
-    return jsonify({'ok': True, 'message': f'{name} registered as {role}.', 'faction': public_faction(row), 'used_banker_key': bool(banker_key_value)})
+        con.execute('''INSERT OR REPLACE INTO devices(faction_id, torn_id, name, role, subscription_json, created_at, last_seen, banker_key, is_enabled)
+                       VALUES(?,?,?,?,?,?,?,?,1)''', (bk['faction_id'], user_check['player_id'], user_check['name'], 'banker', json.dumps(sub), now, now, token))
+        con.execute('UPDATE banker_keys SET last_used=? WHERE banker_key=?', (now, token))
+        faction = con.execute('SELECT * FROM factions WHERE faction_id=?', (bk['faction_id'],)).fetchone()
+    return jsonify({'ok': True, 'message': f'{user_check["name"]} connected. Notifications are ON.', 'faction': public_faction(faction), 'banker_key': public_banker_key(bk)})
+
+
+@app.post('/api/devices/toggle')
+def toggle_device():
+    data = request.get_json(force=True)
+    token = str(data.get('api_token', '')).strip()
+    user_api_key = str(data.get('user_api_key', '')).strip()
+    enabled = 1 if bool(data.get('enabled')) else 0
+    bk = get_banker_key(token)
+    if not bk:
+        return jsonify({'ok': False, 'error': 'invalid_banker_key'}), 404
+    user_check = verify_torn_user_for_banker_key(bk, user_api_key)
+    if not user_check.get('ok'):
+        return jsonify({'ok': False, 'error': 'user_verification_failed', 'details': user_check}), 403
+    with db() as con:
+        con.execute('UPDATE devices SET is_enabled=?, last_seen=? WHERE faction_id=? AND banker_key=? AND torn_id=?', (enabled, iso(utcnow()), bk['faction_id'], token, user_check['player_id']))
+        changed = con.total_changes
+    return jsonify({'ok': True, 'notifications_enabled': bool(enabled), 'message': 'Notifications updated.' if changed else 'No connected device found. Enable phone alerts first.'})
 
 
 def send_push(subscription, title, body, data=None):
@@ -484,12 +534,7 @@ def send_push(subscription, title, body, data=None):
         return {'ok': False, 'error': 'VAPID keys are not set'}
     payload = json.dumps({'title': title, 'body': body, 'data': data or {}})
     try:
-        webpush(
-            subscription_info=subscription,
-            data=payload,
-            vapid_private_key=VAPID_PRIVATE_KEY,
-            vapid_claims={'sub': VAPID_SUBJECT},
-        )
+        webpush(subscription_info=subscription, data=payload, vapid_private_key=VAPID_PRIVATE_KEY, vapid_claims={'sub': VAPID_SUBJECT})
         return {'ok': True}
     except WebPushException as e:
         return {'ok': False, 'error': str(e)}
@@ -502,8 +547,8 @@ def banking_request():
     data = request.get_json(force=True)
     token = str(data.get('api_token', '')).strip()
     row = get_faction_by_token(token)
-    banker_key_row = None
     target_banker_key = None
+    banker_key_row = None
     if not row:
         banker_key_row = get_banker_key(token)
         if not banker_key_row or not banker_key_row['is_active']:
@@ -519,28 +564,19 @@ def banking_request():
     amount = str(data.get('amount', '')).strip() or 'unknown amount'
     note = str(data.get('note', '')).strip()
     alert_id = uuid.uuid4().hex
-    title = '🪙 New Torn Banking Request'
+    title = '🪙 New Torn Banking Request' if not target_banker_key else '🪙 Banking Request For You'
     body = f'{requester} requested {amount}.' + (f' {note}' if note else '')
-    if banker_key_row:
-        title = '🪙 Banking Request For You'
     now = iso(utcnow())
     data_json = {'url': data.get('url') or BASE_URL, 'type': 'banking_request', 'alert_id': alert_id, 'target_banker_key': bool(target_banker_key)}
     with db() as con:
-        con.execute("""INSERT INTO alerts(id, faction_id, title, body, amount, requester_name, created_at, data_json)
-                       VALUES(?,?,?,?,?,?,?,?)""",
-                    (alert_id, row['faction_id'], title, body, amount, requester, now, json.dumps(data_json)))
+        con.execute('''INSERT INTO alerts(id, faction_id, title, body, amount, requester_name, created_at, data_json)
+                       VALUES(?,?,?,?,?,?,?,?)''', (alert_id, row['faction_id'], title, body, amount, requester, now, json.dumps(data_json)))
         if target_banker_key:
-            devices = con.execute("""SELECT d.* FROM devices d
-                                     JOIN banker_keys bk ON bk.banker_key=d.banker_key
-                                     WHERE d.faction_id=? AND d.role='banker' AND d.banker_key=? AND bk.is_active=1""",
-                                  (row['faction_id'], target_banker_key)).fetchall()
+            devices = con.execute('''SELECT d.* FROM devices d JOIN banker_keys bk ON bk.banker_key=d.banker_key
+                                     WHERE d.faction_id=? AND d.role='banker' AND d.banker_key=? AND d.is_enabled=1 AND bk.is_active=1''', (row['faction_id'], target_banker_key)).fetchall()
         else:
-            devices = con.execute("""SELECT d.* FROM devices d
-                                     LEFT JOIN banker_keys bk ON bk.banker_key=d.banker_key
-                                     WHERE d.faction_id=? AND (
-                                       d.role IN ('leader', 'admin')
-                                       OR (d.role='banker' AND (d.banker_key IS NULL OR bk.is_active=1))
-                                     )""", (row['faction_id'],)).fetchall()
+            devices = con.execute('''SELECT d.* FROM devices d LEFT JOIN banker_keys bk ON bk.banker_key=d.banker_key
+                                     WHERE d.faction_id=? AND d.is_enabled=1 AND d.role='banker' AND bk.is_active=1''', (row['faction_id'],)).fetchall()
     sent = 0
     failed = 0
     for d in devices:
@@ -574,9 +610,8 @@ def alert_complete():
     row = get_faction_by_token(token)
     if not row:
         return jsonify({'ok': False, 'error': 'invalid_faction_key'}), 404
-    now = iso(utcnow())
     with db() as con:
-        con.execute('UPDATE alerts SET status="complete", completed_by=?, completed_at=? WHERE id=? AND faction_id=?', (completed_by, now, alert_id, row['faction_id']))
+        con.execute('UPDATE alerts SET status="complete", completed_by=?, completed_at=? WHERE id=? AND faction_id=?', (completed_by, iso(utcnow()), alert_id, row['faction_id']))
     return jsonify({'ok': True})
 
 
@@ -596,20 +631,12 @@ def payment_claim():
     if pricing['active_banker_keys'] <= 0:
         return jsonify({'ok': False, 'error': 'create_at_least_one_active_banker_key_before_payment'}), 400
     if amount not in allowed:
-        return jsonify({
-            'ok': False,
-            'error': 'payment_must_match_active_banker_key_price',
-            'rule': pricing['payment_rule'],
-            'active_banker_keys': pricing['active_banker_keys'],
-            'monthly_cost_xanax': pricing['monthly_cost_xanax'],
-            'allowed_payment_amounts': allowed
-        }), 400
+        return jsonify({'ok': False, 'error': 'payment_must_match_active_banker_key_price', **pricing}), 400
     months_paid = amount // pricing['monthly_cost_xanax']
     claim_id = uuid.uuid4().hex
     with db() as con:
         con.execute('''INSERT INTO payment_claims(id, faction_id, claimed_by, claimed_by_torn_id, xanax_amount, proof_text, created_at, active_banker_keys_at_claim, monthly_cost_at_claim, months_paid)
-                       VALUES(?,?,?,?,?,?,?,?,?,?)''',
-                    (claim_id, row['faction_id'], str(data.get('claimed_by', '')).strip() or 'Unknown', str(data.get('claimed_by_torn_id', '')).strip(), amount, str(data.get('proof_text', '')).strip(), iso(utcnow()), pricing['active_banker_keys'], pricing['monthly_cost_xanax'], months_paid))
+                       VALUES(?,?,?,?,?,?,?,?,?,?)''', (claim_id, row['faction_id'], str(data.get('claimed_by', '')).strip() or 'Unknown', str(data.get('claimed_by_torn_id', '')).strip(), amount, str(data.get('proof_text', '')).strip(), iso(utcnow()), pricing['active_banker_keys'], pricing['monthly_cost_xanax'], months_paid))
     return jsonify({'ok': True, 'claim_id': claim_id, 'months_paid': months_paid, 'days_pending_approval': months_paid * 30, 'pricing': pricing, 'message': 'Payment claim submitted. Fries91/admin must verify it before time is extended.'})
 
 
@@ -639,19 +666,14 @@ def admin_approve_payment():
         if claim['status'] != 'pending':
             return jsonify({'ok': False, 'error': 'claim_already_reviewed'}), 400
         faction = con.execute('SELECT * FROM factions WHERE faction_id=?', (claim['faction_id'],)).fetchone()
-        amount = int(claim['xanax_amount'])
         months_paid = int(claim['months_paid'] or 0)
-        if months_paid <= 0:
-            monthly_cost = int(claim['monthly_cost_at_claim'] or 0) or pricing_for_faction(faction['faction_id'])['monthly_cost_xanax']
-            months_paid = amount // monthly_cost if monthly_cost else 0
         days = months_paid * 30
         now = utcnow()
-        current_active = max([d for d in [parse_dt(faction['trial_until']), parse_dt(faction['paid_until']) if faction['paid_until'] else None] if d])
+        current_active = faction_active_until(faction)
         base = current_active if current_active > now else now
         new_paid_until = base + timedelta(days=days)
         con.execute('UPDATE factions SET paid_until=?, locked=0 WHERE faction_id=?', (iso(new_paid_until), faction['faction_id']))
-        con.execute('''UPDATE payment_claims SET status="approved", reviewed_at=?, reviewed_by=?, admin_note=?, days_added=? WHERE id=?''',
-                    (iso(now), reviewed_by, note, days, claim_id))
+        con.execute('UPDATE payment_claims SET status="approved", reviewed_at=?, reviewed_by=?, admin_note=?, days_added=? WHERE id=?', (iso(now), reviewed_by, note, days, claim_id))
         updated = con.execute('SELECT * FROM factions WHERE faction_id=?', (faction['faction_id'],)).fetchone()
     return jsonify({'ok': True, 'days_added': days, 'faction': public_faction(updated)})
 
@@ -662,8 +684,7 @@ def admin_reject_payment():
     data = request.get_json(force=True)
     claim_id = str(data.get('claim_id', '')).strip()
     with db() as con:
-        con.execute('''UPDATE payment_claims SET status="rejected", reviewed_at=?, reviewed_by=?, admin_note=? WHERE id=? AND status="pending"''',
-                    (iso(utcnow()), str(data.get('reviewed_by', 'Fries91')), str(data.get('admin_note', 'Rejected')), claim_id))
+        con.execute('UPDATE payment_claims SET status="rejected", reviewed_at=?, reviewed_by=?, admin_note=? WHERE id=? AND status="pending"', (iso(utcnow()), str(data.get('reviewed_by', 'Fries91')), str(data.get('admin_note', 'Rejected')), claim_id))
     return jsonify({'ok': True})
 
 
