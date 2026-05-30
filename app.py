@@ -285,6 +285,16 @@ def require_admin():
     return password == ADMIN_PASSWORD
 
 
+def auto_scan_payments_safe():
+    """Run payment scan without breaking normal user actions."""
+    if not FRIES91_TORN_API_KEY:
+        return {'ok': False, 'skipped': True, 'message': 'FRIES91_TORN_API_KEY is not set in Render.'}
+    try:
+        return scan_payments_once()
+    except Exception as exc:
+        return {'ok': False, 'skipped': False, 'message': str(exc)}
+
+
 @app.route('/')
 def index():
     return render_template('index.html', app_name=APP_NAME, vapid_public_key=VAPID_PUBLIC_KEY, base_url=BASE_URL)
@@ -307,50 +317,30 @@ def config():
 @app.route('/api/key/request', methods=['POST'])
 def request_key():
     data = request.get_json(force=True)
-
     owner_name = (data.get('owner_name') or '').strip()
     owner_torn_id = clean_torn_id(data.get('owner_torn_id'))
 
     if not owner_name:
         return jsonify({'ok': False, 'error': 'Enter your Torn name.'}), 400
-
     if not owner_torn_id:
-        return jsonify({
-            'ok': False,
-            'error': 'Enter your Torn ID. Auto payment scan needs this to match your item-send event.'
-        }), 400
+        return jsonify({'ok': False, 'error': 'Enter your Torn ID. Auto payment scan needs this to match your item-send event.'}), 400
 
     now = utcnow()
-
     with db() as con:
         existing = find_existing_key(owner_name=owner_name, owner_torn_id=owner_torn_id)
-
         if existing:
-            con.execute('''
-                UPDATE premium_keys
-                SET owner_name=?, owner_torn_id=?
-                WHERE premium_key=?
-            ''', (owner_name, owner_torn_id, existing['premium_key']))
-
-            row = con.execute(
-                'SELECT * FROM premium_keys WHERE premium_key=?',
-                (existing['premium_key'],)
-            ).fetchone()
+            con.execute('''UPDATE premium_keys SET owner_name=?, owner_torn_id=? WHERE premium_key=?''', (owner_name, owner_torn_id, existing['premium_key']))
+            row = con.execute('SELECT * FROM premium_keys WHERE premium_key=?', (existing['premium_key'],)).fetchone()
         else:
             token = new_premium_key()
             con.execute('''INSERT INTO premium_keys
                 (premium_key, owner_name, owner_torn_id, key_label, is_active, paid_until, created_at)
-                VALUES (?, ?, ?, ?, 0, ?, ?)''', (
-                token, owner_name, owner_torn_id, 'Premium banker ping key', iso(now), iso(now)
-            ))
+                VALUES (?, ?, ?, ?, 0, ?, ?)''', (token, owner_name, owner_torn_id, 'Premium banker ping key', iso(now), iso(now)))
             row = con.execute('SELECT * FROM premium_keys WHERE premium_key=?', (token,)).fetchone()
 
-    return jsonify({
-        'ok': True,
-        'message': 'Premium key found/reserved. Send payment to Fries91, then the scanner can activate or extend it.',
-        'key': public_key(row)
-    })
-
+    scan_result = auto_scan_payments_safe()
+    row = find_existing_key(owner_name=owner_name, owner_torn_id=owner_torn_id, premium_key=row['premium_key'])
+    return jsonify({'ok': True, 'message': 'Premium key found/reserved. If payment was already sent, the app scanned Fries91 events and activated/extended it when matched.', 'key': public_key(row), 'scan': scan_result})
 
 @app.route('/api/payments/claim', methods=['POST'])
 def payment_claim():
@@ -361,25 +351,24 @@ def payment_claim():
         return jsonify({'ok': False, 'error': f'Payment must be one of: {", ".join(map(str, [PREMIUM_KEY_PRICE_XANAX_30_DAYS*m for m in range(1, MAX_PAYMENT_MONTHS+1)]))} Xanax.'}), 400
 
     existing_key = (data.get('premium_key') or '').strip()
-    if existing_key and not get_key(existing_key):
-        return jsonify({'ok': False, 'error': 'That premium key was not found. Use Get/reserve key first.'}), 404
+    claimed_by = (data.get('claimed_by') or '').strip() or 'Unknown'
+    claimed_by_torn_id = clean_torn_id(data.get('claimed_by_torn_id'))
+    row = find_existing_key(owner_name=claimed_by, owner_torn_id=claimed_by_torn_id, premium_key=existing_key)
+
+    scan_result = auto_scan_payments_safe()
+    row = find_existing_key(owner_name=claimed_by, owner_torn_id=claimed_by_torn_id, premium_key=existing_key)
+    if row and key_is_live(row):
+        return jsonify({'ok': True, 'message': 'Payment was found by auto-scan and the key is active.', 'key': public_key(row), 'scan': scan_result})
+    if existing_key and not row:
+        return jsonify({'ok': False, 'error': 'That premium key was not found. Use Get/reserve key first, or enter your Torn ID so the app can find the right key.', 'scan': scan_result}), 404
 
     claim_id = 'claim_' + uuid.uuid4().hex[:18]
     now = iso(utcnow())
     with db() as con:
         con.execute('''INSERT INTO payment_claims
             (id, premium_key, claimed_by, claimed_by_torn_id, xanax_amount, proof_text, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)''', (
-            claim_id,
-            existing_key or None,
-            (data.get('claimed_by') or '').strip() or 'Unknown',
-            (data.get('claimed_by_torn_id') or '').strip(),
-            amount,
-            (data.get('proof_text') or '').strip(),
-            now,
-        ))
-    return jsonify({'ok': True, 'claim_id': claim_id, 'status': 'pending', 'months_requested': months, 'message': 'Claim saved. Auto-scan can also activate payments found in Fries91 event logs.'})
-
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)''', (claim_id, row['premium_key'] if row else (existing_key or None), claimed_by, claimed_by_torn_id, amount, (data.get('proof_text') or '').strip(), now))
+    return jsonify({'ok': True, 'claim_id': claim_id, 'status': 'pending', 'months_requested': months, 'message': 'Auto-scan did not find the payment yet, so a manual claim was saved. Try Scan/Check again in a minute.', 'scan': scan_result, 'key': public_key(row) if row else None})
 
 @app.route('/api/payments/status', methods=['POST'])
 def payment_status():
@@ -399,35 +388,33 @@ def key_status():
     row = get_key(token)
     if not row:
         return jsonify({'ok': False, 'error': 'Premium key not found'}), 404
-    return jsonify({'ok': True, 'key': public_key(row)})
+    scan_result = auto_scan_payments_safe()
+    row = get_key(token)
+    return jsonify({'ok': True, 'key': public_key(row), 'scan': scan_result})
 
 
 @app.route('/api/key/find', methods=['POST'])
 def key_find():
     data = request.get_json(force=True)
-
     torn_id = clean_torn_id(data.get('owner_torn_id') or data.get('torn_id'))
     owner_name = (data.get('owner_name') or data.get('name') or '').strip()
     premium_key = (data.get('premium_key') or data.get('key') or '').strip()
-
-    row = find_existing_key(
-        owner_name=owner_name,
-        owner_torn_id=torn_id,
-        premium_key=premium_key
-    )
-
+    scan_result = auto_scan_payments_safe()
+    row = find_existing_key(owner_name=owner_name, owner_torn_id=torn_id, premium_key=premium_key)
     if not row:
-        return jsonify({
-            'ok': False,
-            'error': 'No premium key found. Try Get/reserve premium key again with your Torn name and Torn ID.'
-        }), 404
+        return jsonify({'ok': False, 'error': 'No premium key found. Try Get/reserve premium key again with your Torn name and Torn ID.', 'scan': scan_result}), 404
+    return jsonify({'ok': True, 'message': 'Premium key found. Auto-scan ran while checking.', 'key': public_key(row), 'scan': scan_result})
 
-    return jsonify({
-        'ok': True,
-        'message': 'Premium key found.',
-        'key': public_key(row)
-    })
 
+@app.route('/api/key/scan-my-payment', methods=['POST'])
+def key_scan_my_payment():
+    data = request.get_json(force=True)
+    token = (data.get('premium_key') or '').strip()
+    torn_id = clean_torn_id(data.get('owner_torn_id') or data.get('torn_id'))
+    owner_name = (data.get('owner_name') or data.get('name') or '').strip()
+    scan_result = auto_scan_payments_safe()
+    row = find_existing_key(owner_name=owner_name, owner_torn_id=torn_id, premium_key=token)
+    return jsonify({'ok': True, 'message': 'Scan finished. If a matching payment was found, your key is now active/extended.', 'key': public_key(row) if row else None, 'scan': scan_result})
 
 @app.route('/api/devices/register', methods=['POST'])
 def device_register():
@@ -621,68 +608,57 @@ def fetch_torn_events():
 def normalize_events(data):
     events = []
     raw = data.get('events') if isinstance(data, dict) else None
+
+    def make_event(event_id, val):
+        if isinstance(val, dict):
+            text = (val.get('event') or val.get('message') or val.get('text') or val.get('description') or val.get('log') or json.dumps(val))
+            ts = val.get('timestamp') or val.get('time') or val.get('created_at') or val.get('created')
+            sender_id = val.get('sender_id') or val.get('user_id') or val.get('player_id') or val.get('from_id')
+            sender_name = val.get('sender_name') or val.get('user_name') or val.get('player_name') or val.get('from_name')
+        else:
+            text, ts, sender_id, sender_name = str(val), None, None, None
+        return {'event_id': str(event_id), 'text': text, 'timestamp': ts, 'sender_id': str(sender_id) if sender_id else None, 'sender_name': str(sender_name).strip() if sender_name else None, 'raw': val if isinstance(val, dict) else None}
+
     if isinstance(raw, dict):
         for event_id, val in raw.items():
-            if isinstance(val, dict):
-                text = val.get('event') or val.get('message') or val.get('text') or json.dumps(val)
-                ts = val.get('timestamp') or val.get('time') or val.get('created_at')
-            else:
-                text = str(val)
-                ts = None
-            events.append({'event_id': str(event_id), 'text': text, 'timestamp': ts})
+            events.append(make_event(event_id, val))
     elif isinstance(raw, list):
         for idx, val in enumerate(raw):
-            if isinstance(val, dict):
-                event_id = val.get('id') or val.get('event_id') or val.get('timestamp') or idx
-                text = val.get('event') or val.get('message') or val.get('text') or json.dumps(val)
-                ts = val.get('timestamp') or val.get('time') or val.get('created_at')
-            else:
-                event_id = idx
-                text = str(val)
-                ts = None
-            events.append({'event_id': str(event_id), 'text': text, 'timestamp': ts})
+            event_id = (val.get('id') or val.get('event_id') or val.get('timestamp') or idx) if isinstance(val, dict) else idx
+            events.append(make_event(event_id, val))
     return events
 
 
-def parse_payment_event(text):
+def parse_payment_event(text, event=None):
+    event = event or {}
     t = text or ''
+    item = re.escape(PAYMENT_ITEM_NAME)
     if PAYMENT_ITEM_NAME.lower() not in t.lower():
         return None
-    if not re.search(r'\b(sent|given|received|receive|send)\b', t, re.I):
+    if not re.search(r'\b(sent|send|given|gave|received|receive|item|items|xanax)\b', t, re.I):
         return None
 
     amount = None
-    patterns = [
-        rf'(\d+)\s*x\s*{re.escape(PAYMENT_ITEM_NAME)}',
-        rf'(\d+)\s+{re.escape(PAYMENT_ITEM_NAME)}',
-        rf'{re.escape(PAYMENT_ITEM_NAME)}\s*x\s*(\d+)',
-        rf'{re.escape(PAYMENT_ITEM_NAME)}.*?(\d+)',
-    ]
-    for p in patterns:
-        m = re.search(p, t, re.I)
+    patterns = [rf'(\d+)\s*x\s*{item}', rf'(\d+)\s*×\s*{item}', rf'(\d+)\s+{item}', rf'{item}\s*x\s*(\d+)', rf'{item}\s*×\s*(\d+)', rf'{item}[^0-9]{{0,20}}(\d+)']
+    for ptn in patterns:
+        m = re.search(ptn, t, re.I)
         if m:
             amount = int(m.group(1))
             break
     if not amount or not months_from_amount(amount):
         return None
 
-    # Prefer explicit Torn profile link/id in square brackets.
+    sender_id = clean_torn_id(event.get('sender_id')) if event.get('sender_id') else None
+    sender_name = event.get('sender_name')
     ids = re.findall(r'\[(\d{3,10})\]', t)
-    sender_id = ids[0] if ids else None
-
-    sender_name = None
-    name_patterns = [
-        r'from\s+([^\[]+?)\s*\[\d+\]',
-        r'([^\[]+?)\s*\[\d+\].*?sent',
-        r'You were sent.*?from\s+([^\.]+)',
-        r'You received.*?from\s+([^\.]+)',
-    ]
-    for p in name_patterns:
-        m = re.search(p, t, re.I)
-        if m:
-            sender_name = re.sub(r'\s+', ' ', m.group(1)).strip(' .:-')
-            break
-
+    if not sender_id and ids:
+        sender_id = ids[0]
+    if not sender_name:
+        for ptn in [r'from\s+([^\[]+?)\s*\[\d+\]', r'([^\[]+?)\s*\[\d+\].*?\b(sent|gave|given)\b', r'You were sent.*?from\s+([^\.]+)', r'You received.*?from\s+([^\.]+)', r'([^\.]+?)\s+sent\s+you', r'([^\.]+?)\s+gave\s+you']:
+            m = re.search(ptn, t, re.I)
+            if m:
+                sender_name = re.sub(r'\s+', ' ', m.group(1)).strip(' .:-')
+                break
     if not sender_id:
         return None
     return {'sender_torn_id': sender_id, 'sender_name': sender_name or f'Torn {sender_id}', 'amount': amount}
@@ -703,7 +679,7 @@ def scan_payments_once():
                     event_id = str(ev.get('event_id'))
                     if con.execute('SELECT 1 FROM processed_payment_events WHERE event_id=?', (event_id,)).fetchone():
                         continue
-                    parsed = parse_payment_event(ev.get('text', ''))
+                    parsed = parse_payment_event(ev.get('text', ''), ev)
                     if not parsed:
                         continue
                     payments_found += 1
@@ -712,27 +688,19 @@ def scan_payments_once():
                         payments_activated += 1
                         con.execute('''INSERT INTO processed_payment_events
                             (event_id, sender_name, sender_torn_id, xanax_amount, event_text, event_time, premium_key, days_added, processed_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', (
-                            event_id, parsed['sender_name'], parsed['sender_torn_id'], parsed['amount'], ev.get('text', ''), str(ev.get('timestamp') or ''), key_row['premium_key'], days, now
-                        ))
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', (event_id, parsed['sender_name'], parsed['sender_torn_id'], parsed['amount'], ev.get('text', ''), str(ev.get('timestamp') or ''), key_row['premium_key'], days, now))
                         claim_id = 'auto_' + uuid.uuid4().hex[:18]
                         con.execute('''INSERT INTO payment_claims
                             (id, premium_key, claimed_by, claimed_by_torn_id, xanax_amount, proof_text, status, created_at, reviewed_at, reviewed_by, admin_note, days_added, key_created, created_key)
-                            VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, 'auto-scan', ?, ?, ?, ?)''', (
-                            claim_id, key_row['premium_key'], parsed['sender_name'], parsed['sender_torn_id'], parsed['amount'], ev.get('text', ''), now, now,
-                            f'Auto approved from Torn event {event_id}', days, 1 if created else 0, key_row['premium_key']
-                        ))
+                            VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, 'auto-scan', ?, ?, ?, ?)''', (claim_id, key_row['premium_key'], parsed['sender_name'], parsed['sender_torn_id'], parsed['amount'], ev.get('text', ''), now, now, f'Auto approved from Torn event {event_id}', days, 1 if created else 0, key_row['premium_key']))
                         results.append({'event_id': event_id, 'sender': parsed['sender_name'], 'torn_id': parsed['sender_torn_id'], 'amount': parsed['amount'], 'premium_key': key_row['premium_key'], 'days_added': days})
-                con.execute('INSERT INTO scan_runs (ran_at, ok, events_seen, payments_found, payments_activated, message) VALUES (?, 1, ?, ?, ?, ?)',
-                            (now, events_seen, payments_found, payments_activated, message))
+                con.execute('INSERT INTO scan_runs (ran_at, ok, events_seen, payments_found, payments_activated, message) VALUES (?, 1, ?, ?, ?, ?)', (now, events_seen, payments_found, payments_activated, message))
         except Exception as exc:
             ok = False
             message = str(exc)
             with db() as con:
-                con.execute('INSERT INTO scan_runs (ran_at, ok, events_seen, payments_found, payments_activated, message) VALUES (?, 0, ?, ?, ?, ?)',
-                            (now, events_seen, payments_found, payments_activated, message))
+                con.execute('INSERT INTO scan_runs (ran_at, ok, events_seen, payments_found, payments_activated, message) VALUES (?, 0, ?, ?, ?, ?)', (now, events_seen, payments_found, payments_activated, message))
     return {'ok': ok, 'events_seen': events_seen, 'payments_found': payments_found, 'payments_activated': payments_activated, 'message': message, 'activated': results}
-
 
 def scanner_loop():
     import time
